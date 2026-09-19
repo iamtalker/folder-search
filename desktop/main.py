@@ -17,8 +17,42 @@ from concurrent.futures import ThreadPoolExecutor
 import webview
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-HISTORY_FILE = os.path.join(APP_DIR, "history.json")
-CACHE_DIR = os.path.join(APP_DIR, "cache")
+FROZEN = bool(getattr(sys, "frozen", False))
+
+
+def resource_path(relative_path):
+    """
+    Locate a bundled file (currently just 폴더검색.html) whether running as
+    a plain script or as a PyInstaller --onefile exe. Frozen, PyInstaller
+    unpacks --add-data files into a temp dir at sys._MEIPASS each run;
+    unfrozen, it's just next to this script as before.
+    """
+    base = getattr(sys, "_MEIPASS", APP_DIR) if FROZEN else os.path.join(APP_DIR, "..")
+    return os.path.join(base, relative_path)
+
+
+def app_data_dir():
+    """
+    Where history.json/cache/ live. Unfrozen, that's next to this script,
+    same as always. Frozen, APP_DIR would resolve inside the --onefile
+    build's temp extraction folder (sys._MEIPASS-adjacent), which is wiped
+    after every run - anything written there wouldn't survive to the next
+    launch, defeating both the history list and the whole point of the
+    on-disk scan cache. %LOCALAPPDATA% is the standard, always-writable
+    place for a Windows app to keep its own data regardless of where the
+    exe itself was downloaded to.
+    """
+    if not FROZEN:
+        return APP_DIR
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    d = os.path.join(base, "FolderSearch")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+DATA_DIR = app_data_dir()
+HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
+CACHE_DIR = os.path.join(DATA_DIR, "cache")
 MAX_FILE_BYTES = 3 * 1024 * 1024
 MAX_HISTORY = 8
 SCAN_CHUNK = 200
@@ -506,7 +540,7 @@ def main():
     api = Api()
     # shared with the web version - one file works as both, see 폴더검색.html's
     # environment detection (pywebview vs plain browser)
-    index_path = os.path.join(APP_DIR, "..", "폴더검색.html")
+    index_path = resource_path("폴더검색.html")
     window = webview.create_window(
         "폴더검색",
         index_path,

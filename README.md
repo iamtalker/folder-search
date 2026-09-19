@@ -5,16 +5,18 @@
 
 A single self-contained HTML file that lets you pick a local folder in your browser and full-text search its files — no server, no install. Just download `폴더검색.html` and open it in your browser.
 
-두 가지 버전이 있습니다: **웹 버전**(`폴더검색.html` 하나) / **데스크톱 버전**(`desktop/` 폴더, 파이썬+pywebview).
+세 가지 형태가 있습니다: **웹 버전**(`폴더검색.html` 하나) / **데스크톱 exe**(`FolderSearch.exe` 하나, 파이썬 설치 불필요 — [Releases](../../releases)에서 다운로드) / **데스크톱 파이썬 버전**(`desktop/` 폴더, 직접 실행/개발용).
 
-There are two versions: a **web version** (single file `폴더검색.html`) and a **desktop version** (`desktop/` folder, Python + pywebview).
+There are three forms: a **web version** (single file `폴더검색.html`), a **standalone desktop exe** (`FolderSearch.exe`, no Python install needed — download from [Releases](../../releases)), and the **desktop Python source** (`desktop/` folder, for running from source / development).
 
 ## 요구사항 / Requirements
 
 - **웹 버전**: Chrome 또는 Edge (File System Access API를 사용합니다. Firefox/Safari는 아직 미지원)
 - **Web version**: Chrome or Edge (uses the File System Access API; not yet supported in Firefox/Safari)
-- **데스크톱 버전**: Python 3 + `pip install -r desktop/requirements.txt` (Windows, WebView2 런타임 필요 — Windows 10/11엔 보통 이미 있음)
-- **Desktop version**: Python 3 + `pip install -r desktop/requirements.txt` (Windows, needs the WebView2 runtime — already present on most Windows 10/11 machines)
+- **데스크톱 exe**: Windows + WebView2 런타임(보통 이미 있음). 그 외 아무것도 설치할 필요 없음.
+- **Desktop exe**: Windows + the WebView2 runtime (usually already present). Nothing else to install.
+- **데스크톱 파이썬 버전**: Python 3 + `pip install -r desktop/requirements.txt` (Windows, WebView2 런타임 필요)
+- **Desktop Python version**: Python 3 + `pip install -r desktop/requirements.txt` (Windows, needs the WebView2 runtime)
 
 ## 기능 / Features
 
@@ -31,8 +33,11 @@ There are two versions: a **web version** (single file `폴더검색.html`) and 
 **웹 버전**: `폴더검색.html`을 다운로드해서 더블클릭으로 엽니다 (Chrome/Edge).
 **Web version**: download `폴더검색.html` and open it (Chrome/Edge).
 
-**데스크톱 버전**: 저장소 전체(`폴더검색.html` + `desktop/`)를 받아서 `pip install -r desktop/requirements.txt` 후 루트의 `run.bat` 실행 (또는 `python desktop/main.py`).
-**Desktop version**: grab the whole repo (`폴더검색.html` + `desktop/`), `pip install -r desktop/requirements.txt`, then run `run.bat` at the repo root (or `python desktop/main.py`).
+**데스크톱 exe**: [Releases](../../releases)에서 `FolderSearch.exe`를 다운로드해서 그냥 실행합니다. 그게 전부입니다.
+**Desktop exe**: download `FolderSearch.exe` from [Releases](../../releases) and just run it. That's it.
+
+**데스크톱 파이썬 버전(소스로 실행)**: 저장소 전체(`폴더검색.html` + `desktop/`)를 받아서 `pip install -r desktop/requirements.txt` 후 루트의 `run.bat` 실행 (또는 `python desktop/main.py`).
+**Desktop Python version (run from source)**: grab the whole repo (`폴더검색.html` + `desktop/`), `pip install -r desktop/requirements.txt`, then run `run.bat` at the repo root (or `python desktop/main.py`).
 
 1. "📁 폴더 선택"을 눌러 검색할 폴더를 고릅니다.
 2. 검색창에 검색어를 입력합니다. 공백은 AND로 동작하고, `OR`/`NOT`과 괄호도 쓸 수 있습니다.
@@ -51,6 +56,12 @@ There are two versions: a **web version** (single file `폴더검색.html`) and 
 
 This tool reads every matching file's content into the browser's memory, so it's best suited for searching **file contents** within a folder of up to a few tens of thousands of files. For filename-only search across an entire drive, a native indexer like [Everything](https://www.voidtools.com/) will be much faster.
 
+## exe 빌드 방법 / Building the exe
+
+`desktop/build_exe.bat` 실행 (PyInstaller 사용, `폴더검색.html`을 exe 안에 내장시킴). 결과물은 `desktop/dist/FolderSearch.exe`.
+
+Run `desktop/build_exe.bat` (uses PyInstaller, embeds `폴더검색.html` inside the exe). Output: `desktop/dist/FolderSearch.exe`.
+
 ## 개인정보 / Privacy
 
 모든 처리는 브라우저 안에서만 이루어집니다. 파일 내용이나 폴더 경로가 어디로도 전송되지 않습니다.
@@ -60,3 +71,8 @@ Everything runs entirely client-side in your browser. No file content or folder 
 ## 라이선스 / License
 
 MIT
+
+## Contributors
+
+- [iamtalker](https://github.com/iamtalker)
+- [Claude](https://claude.com/claude-code) (Anthropic) — pair-programmed the whole thing, from the first version through the performance rework and the exe packaging

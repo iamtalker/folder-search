@@ -1,5 +1,8 @@
 desktop/history.json
 desktop/cache/
 desktop/__pycache__/
+desktop/build/
+desktop/dist/
+desktop/*.spec
 __pycache__/
 *.pyc
