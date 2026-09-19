@@ -20,8 +20,7 @@
   button { background: var(--accent); color: #fff; border: none; border-radius: 5px; padding: 7px 14px; cursor: pointer; font-size: 0.95em; }
   button:disabled { opacity: 0.4; cursor: default; }
   button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
-  input[type=text], input[type=date] { background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 5px; padding: 7px 10px; font-size: 0.95em; }
-  input[type=date] { color-scheme: light dark; }
+  input[type=text] { background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 5px; padding: 7px 10px; font-size: 0.95em; }
   #query { flex: 1; min-width: 240px; }
   #extFilter { width: 340px; }
   .muted { color: var(--muted); font-size: 0.88em; }
@@ -90,9 +89,9 @@
   <div class="muted">공백=AND, OR / AND / NOT(제외) 및 괄호 지원, 큰따옴표로 "정확한 구절" 검색 가능</div>
   <div class="row">
     <label class="muted" for="dateFrom">수정일 기간:</label>
-    <input type="date" id="dateFrom">
+    <input type="text" id="dateFrom" placeholder="2021.01.01" style="width:110px">
     <span class="muted">~</span>
-    <input type="date" id="dateTo">
+    <input type="text" id="dateTo" placeholder="2025.03.03" style="width:110px">
     <button id="dateClearBtn" class="secondary">기간 지우기</button>
   </div>
   <div class="status" id="resultStatus"></div>
@@ -724,12 +723,27 @@
     return (bytes / 1024 / 1024).toFixed(1) + 'MB';
   }
 
-  // Date inputs give "YYYY-MM-DD" or "" - convert to inclusive ms bounds
-  // (start of day / end of day, local time) against each doc's mtime, or
-  // null when that side of the range isn't set.
+  // Free-typed date fields (e.g. "2021.01.01") - accepts '.', '-' or '/' as
+  // the separator and 1-2 digit month/day. Returns null if the field is
+  // empty or doesn't parse as a plausible date, rather than throwing.
+  function parseDateText(s) {
+    s = (s || '').trim();
+    if (!s) return null;
+    var m = s.match(/^(\d{4})[.\-\/](\d{1,2})[.\-\/](\d{1,2})$/);
+    if (!m) return null;
+    var y = parseInt(m[1], 10), mo = parseInt(m[2], 10), d = parseInt(m[3], 10);
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+    return { y: y, mo: mo, d: d };
+  }
+
+  // Converts the two date fields to inclusive ms bounds (start of day /
+  // end of day, local time) against each doc's mtime; null on either side
+  // means that side of the range isn't set (or doesn't parse).
   function dateRangeMs() {
-    var from = dateFromInput.value ? new Date(dateFromInput.value + 'T00:00:00').getTime() : null;
-    var to = dateToInput.value ? new Date(dateToInput.value + 'T23:59:59.999').getTime() : null;
+    var f = parseDateText(dateFromInput.value);
+    var t = parseDateText(dateToInput.value);
+    var from = f ? new Date(f.y, f.mo - 1, f.d, 0, 0, 0, 0).getTime() : null;
+    var to = t ? new Date(t.y, t.mo - 1, t.d, 23, 59, 59, 999).getTime() : null;
     return { from: from, to: to };
   }
 
@@ -803,13 +817,14 @@
   }
 
   var searchTimer = null;
-  queryInput.addEventListener('input', function () {
+  queryInput.addEventListener('input', debouncedSearch);
+
+  function debouncedSearch() {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(runSearch, 150);
-  });
-
-  dateFromInput.addEventListener('change', function () { runSearch(); });
-  dateToInput.addEventListener('change', function () { runSearch(); });
+  }
+  dateFromInput.addEventListener('input', debouncedSearch);
+  dateToInput.addEventListener('input', debouncedSearch);
   dateClearBtn.addEventListener('click', function () {
     dateFromInput.value = '';
     dateToInput.value = '';
