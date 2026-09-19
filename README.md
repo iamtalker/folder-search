@@ -40,9 +40,9 @@ There are two versions: a **web version** (single file `폴더검색.html`) and 
 
 ### 웹 버전 vs 데스크톱 버전 / Web vs Desktop
 
-데스크톱 버전은 OS의 파일 선택창을 그대로 쓰기 때문에, 웹 버전에서 브라우저 보안 정책상 막혀있는 "문서/바탕화면/다운로드" 같은 폴더도 제한 없이 고를 수 있습니다.
+**데스크톱 버전을 만든 이유가 바로 이겁니다**: 웹 버전은 브라우저(File System Access API) 보안 정책상 "문서/바탕화면/다운로드" 같은 몇몇 폴더를 아예 선택하지 못하게 막혀있습니다. 데스크톱 버전은 OS의 파일 선택창을 그대로 쓰기 때문에 이 제한이 없어서, 막혀있는 폴더까지 검색하고 싶을 때 씁니다.
 
-The desktop version uses the OS's native folder picker, so it doesn't have the browser's restriction that blocks picking well-known folders like Documents/Desktop/Downloads directly.
+**This is exactly why the desktop version exists**: the web version's browser API (File System Access API) refuses to let you pick certain folders at all — Documents, Desktop, Downloads. The desktop version uses the OS's native folder picker instead, which has no such restriction, so it's the one to use when you need to search a folder the web version won't even let you open.
 
 ## 왜 만들었나 / Why
 
