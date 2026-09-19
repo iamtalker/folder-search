@@ -436,13 +436,16 @@ class Api:
         self._docs = docs
         self._docs_root = root_path
 
-    def search(self, root_path, query, sort_mode):
+    def search(self, root_path, query, sort_mode, date_from=None, date_to=None):
         """
         Runs entirely server-side against self._docs (populated by
         scan_folder) and returns only a small page of results - see
         scan_folder's docstring for why. Mirrors 폴더검색.html's WebBackend
         search logic (tokenize/parseQuery/evalNode/score/snippet) exactly,
         just in Python instead of JS.
+
+        date_from/date_to: optional epoch-ms bounds (inclusive) on a doc's
+        mtime, from the page's date-range inputs.
         """
         if root_path != self._docs_root:
             return {"total": 0, "matchedTotal": 0, "results": []}
@@ -453,7 +456,12 @@ class Api:
         if node:
             collect_positive_words(node, positive_words)
 
-        matched = [d for d in self._docs if node is None or eval_node(node, d["_haystack"])]
+        matched = [
+            d for d in self._docs
+            if (date_from is None or d["mtime"] >= date_from)
+            and (date_to is None or d["mtime"] <= date_to)
+            and (node is None or eval_node(node, d["_haystack"]))
+        ]
 
         scores = None
         if sort_mode == "relevance" and q:

@@ -20,7 +20,8 @@
   button { background: var(--accent); color: #fff; border: none; border-radius: 5px; padding: 7px 14px; cursor: pointer; font-size: 0.95em; }
   button:disabled { opacity: 0.4; cursor: default; }
   button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
-  input[type=text] { background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 5px; padding: 7px 10px; font-size: 0.95em; }
+  input[type=text], input[type=date] { background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 5px; padding: 7px 10px; font-size: 0.95em; }
+  input[type=date] { color-scheme: light dark; }
   #query { flex: 1; min-width: 240px; }
   #extFilter { width: 340px; }
   .muted { color: var(--muted); font-size: 0.88em; }
@@ -87,6 +88,13 @@
     </div>
   </div>
   <div class="muted">공백=AND, OR / AND / NOT(제외) 및 괄호 지원, 큰따옴표로 "정확한 구절" 검색 가능</div>
+  <div class="row">
+    <label class="muted" for="dateFrom">수정일 기간:</label>
+    <input type="date" id="dateFrom">
+    <span class="muted">~</span>
+    <input type="date" id="dateTo">
+    <button id="dateClearBtn" class="secondary">기간 지우기</button>
+  </div>
   <div class="status" id="resultStatus"></div>
 </div>
 
@@ -106,6 +114,9 @@
   var progressBar = document.getElementById('progressBar');
   var progressLabel = document.getElementById('progressLabel');
   var queryInput = document.getElementById('query');
+  var dateFromInput = document.getElementById('dateFrom');
+  var dateToInput = document.getElementById('dateTo');
+  var dateClearBtn = document.getElementById('dateClearBtn');
   var sortRelevanceBtn = document.getElementById('sortRelevance');
   var sortTimeBtn = document.getElementById('sortTime');
   var resultStatus = document.getElementById('resultStatus');
@@ -188,8 +199,8 @@
       // the measurements behind it.
       return await pywebview.api.scan_folder(ref, exts, excludeNames, !!forceRefresh);
     },
-    runSearch: async function (ref, query, sortMode) {
-      return await pywebview.api.search(ref, query, sortMode);
+    runSearch: async function (ref, query, sortMode, dateFrom, dateTo) {
+      return await pywebview.api.search(ref, query, sortMode, dateFrom, dateTo);
     },
     getFileContent: async function (ref, doc) {
       return await pywebview.api.get_file_content(ref, doc.path);
@@ -365,13 +376,15 @@
     // already lives in this same JS heap), so unlike DesktopBackend it just
     // runs the shared boolean-parser/scorer/snippet functions directly
     // in-process against the full content it already holds.
-    runSearch: async function (ref, query, sortMode) {
+    runSearch: async function (ref, query, sortMode, dateFrom, dateTo) {
       var q = (query || '').trim();
       var node = q ? parseQuery(q) : null;
       var positiveWords = [];
       if (node) collectPositiveWords(node, positiveWords);
 
       var matched = this._docs.filter(function (doc) {
+        if (dateFrom != null && doc.mtime < dateFrom) return false;
+        if (dateTo != null && doc.mtime > dateTo) return false;
         if (!node) return true;
         var haystack = (doc.name + '\n' + doc.content).toLowerCase();
         return evalNode(node, haystack);
@@ -711,6 +724,15 @@
     return (bytes / 1024 / 1024).toFixed(1) + 'MB';
   }
 
+  // Date inputs give "YYYY-MM-DD" or "" - convert to inclusive ms bounds
+  // (start of day / end of day, local time) against each doc's mtime, or
+  // null when that side of the range isn't set.
+  function dateRangeMs() {
+    var from = dateFromInput.value ? new Date(dateFromInput.value + 'T00:00:00').getTime() : null;
+    var to = dateToInput.value ? new Date(dateToInput.value + 'T23:59:59.999').getTime() : null;
+    return { from: from, to: to };
+  }
+
   // Delegates to Backend.runSearch, which either asks Python to search
   // server-side (desktop - see main.py's search()) or filters/scores/sorts
   // this.​_docs in-process (web). Either way it comes back as a small,
@@ -718,8 +740,9 @@
   var searchSeq = 0;
   async function runSearch() {
     var q = queryInput.value.trim();
+    var range = dateRangeMs();
     var mySeq = ++searchSeq;
-    var result = await Backend.runSearch(currentRef, q, sortMode);
+    var result = await Backend.runSearch(currentRef, q, sortMode, range.from, range.to);
     if (mySeq !== searchSeq) return; // a newer search finished first, drop this stale one
 
     resultStatus.textContent = result.total + '개 중 ' + result.matchedTotal + '개 일치' +
@@ -783,6 +806,14 @@
   queryInput.addEventListener('input', function () {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(runSearch, 150);
+  });
+
+  dateFromInput.addEventListener('change', function () { runSearch(); });
+  dateToInput.addEventListener('change', function () { runSearch(); });
+  dateClearBtn.addEventListener('click', function () {
+    dateFromInput.value = '';
+    dateToInput.value = '';
+    runSearch();
   });
 
   sortRelevanceBtn.addEventListener('click', function () {
