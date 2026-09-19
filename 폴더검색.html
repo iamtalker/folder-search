@@ -623,15 +623,35 @@
   // ---- boolean query parser: WORD / "phrase", AND (implicit or explicit), OR, NOT (exclude), parentheses ----
 
   function tokenize(q) {
+    // depth tracks how many '(' are still unclosed. A plain \S+ match is
+    // greedy and doesn't stop at ')', so "(NOT word)" without a space
+    // before the ')' would otherwise swallow it into the word ("word)")
+    // and leave the group unclosed. When depth > 0, peel a trailing run of
+    // ')' off such a word (up to depth many) into their own tokens instead
+    // - ')' is never a meaningful character inside an unquoted search word
+    // once a group is open, so this can't misinterpret a literal word.
     var tokens = [];
     var re = /"([^"]*)"|\(|\)|\bAND\b|\bOR\b|\bNOT\b|\S+/g;
     var m;
+    var depth = 0;
     while ((m = re.exec(q)) !== null) {
       var t = m[0];
-      if (t === '(' || t === ')') tokens.push({ type: t });
+      if (t === '(') { tokens.push({ type: '(' }); depth++; }
+      else if (t === ')') { tokens.push({ type: ')' }); depth = Math.max(0, depth - 1); }
       else if (t === 'AND' || t === 'OR' || t === 'NOT') tokens.push({ type: t });
       else if (m[1] !== undefined) tokens.push({ type: 'WORD', value: m[1] });
-      else tokens.push({ type: 'WORD', value: t });
+      else {
+        var stripped = t.replace(/\)+$/, '');
+        var trailingClose = Math.min(depth, t.length - stripped.length);
+        if (trailingClose) {
+          var core = t.slice(0, t.length - trailingClose);
+          if (core) tokens.push({ type: 'WORD', value: core });
+          for (var i = 0; i < trailingClose; i++) tokens.push({ type: ')' });
+          depth -= trailingClose;
+        } else {
+          tokens.push({ type: 'WORD', value: t });
+        }
+      }
     }
     return tokens;
   }

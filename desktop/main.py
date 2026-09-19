@@ -78,17 +78,41 @@ _TOKEN_RE = re.compile(r'"([^"]*)"|\(|\)|\bAND\b|\bOR\b|\bNOT\b|\S+')
 
 
 def tokenize_query(q):
+    """
+    depth tracks how many '(' are still unclosed. A plain \\S+ match is
+    greedy and doesn't stop at ')', so "(NOT word)" without a space before
+    the ')' would otherwise swallow it into the word ("word)") and leave the
+    group unclosed. When depth > 0, peel a trailing run of ')' off such a
+    word (up to depth many) into their own tokens instead - ')' is never a
+    meaningful character inside an unquoted search word once a group is
+    open, so this can't misinterpret an intentional literal word.
+    """
     tokens = []
+    depth = 0
     for m in _TOKEN_RE.finditer(q):
         t = m.group(0)
-        if t in ("(", ")"):
-            tokens.append({"type": t})
+        if t == "(":
+            tokens.append({"type": "("})
+            depth += 1
+        elif t == ")":
+            tokens.append({"type": ")"})
+            depth = max(0, depth - 1)
         elif t in ("AND", "OR", "NOT"):
             tokens.append({"type": t})
         elif m.group(1) is not None:
             tokens.append({"type": "WORD", "value": m.group(1)})
         else:
-            tokens.append({"type": "WORD", "value": t})
+            stripped = t.rstrip(")")
+            trailing_close = min(depth, len(t) - len(stripped))
+            if trailing_close:
+                core = t[:len(t) - trailing_close]
+                if core:
+                    tokens.append({"type": "WORD", "value": core})
+                for _ in range(trailing_close):
+                    tokens.append({"type": ")"})
+                depth -= trailing_close
+            else:
+                tokens.append({"type": "WORD", "value": t})
     return tokens
 
 
@@ -352,15 +376,23 @@ class Api:
         """
         allowed_exts: list[str] lowercase, no dot, or None/[] for "allow all"
         exclude_names: list[str] of directory names to skip anywhere in the tree
-        force_refresh: True (the page's "새로고침" button) skips the on-disk
-            cache below and always re-reads from the filesystem.
+        force_refresh: True (the page's "새로고침" button) ignores the on-disk
+            cache below entirely and re-reads every file's content, even if
+            unchanged.
 
-        Unless force_refresh, first checks a per-folder cache file on disk
-        (desktop/cache/<md5 of path>.json) saved from a previous run, so
-        closing and reopening the app doesn't mean reading everything from
-        disk again.
+        Unless force_refresh, first loads a per-folder cache file on disk
+        (desktop/cache/<md5 of path>.json) saved from a previous run - but
+        the cache is no longer trusted blindly. The folder is always walked
+        to get the current file list, and each candidate file is stat'd
+        (cheap) and compared against the cached entry's mtime/size: unchanged
+        files reuse their cached content as-is (no re-read), while new or
+        changed files are read fresh. Files present in the cache but no
+        longer on disk are simply dropped by virtue of not being in the
+        fresh candidate list. This keeps closing/reopening the app fast
+        without ever serving stale content when files were edited outside
+        the "새로고침" button.
 
-        Reads (or loads from cache) the full document set, including file
+        Reads (or reuses from cache) the full document set, including file
         content, and keeps it server-side in self._docs - it does NOT send
         that content to the page. Search runs here too (see search()) for
         exactly that reason: earlier versions streamed every file's content
@@ -374,38 +406,22 @@ class Api:
         thing that does.
         The return value is just the total file count.
         """
+        cached_by_path = {}
+        cache_note = None
         if not force_refresh:
             cached = load_scan_cache(root_path)
-            cache_note = "no cache file"
             if cached:
                 meta, chunk_lines = cached
                 if meta.get("exts") == allowed_exts and meta.get("excludes") == exclude_names:
-                    total = meta.get("total", 0)
-                    docs = []
-                    done = 0
                     for chunk_json in chunk_lines:
-                        docs.extend(json.loads(chunk_json))
-                        done = min(done + SCAN_CHUNK, total)
-                        try:
-                            self._window.evaluate_js(f"window.onScanProgress({done}, {total})")
-                        except Exception:
-                            pass
-                    self._index_docs(root_path, docs)
-                    try:
-                        self._window.evaluate_js("window.onScanSource('cache')")
-                    except Exception:
-                        pass
-                    return total
-                cache_note = f"filter mismatch: cached={meta.get('exts')!r}/{meta.get('excludes')!r} vs requested={allowed_exts!r}/{exclude_names!r}"
-            try:
-                self._window.evaluate_js(f"window.onScanSource('live', {json.dumps(cache_note)})")
-            except Exception:
-                pass
+                        for d in json.loads(chunk_json):
+                            cached_by_path[d["fullPath"]] = d
+                else:
+                    cache_note = f"filter mismatch: cached={meta.get('exts')!r}/{meta.get('excludes')!r} vs requested={allowed_exts!r}/{exclude_names!r}"
+            else:
+                cache_note = "no cache file"
         else:
-            try:
-                self._window.evaluate_js("window.onScanSource('live', '새로고침으로 강제 재스캔')")
-            except Exception:
-                pass
+            cache_note = "새로고침으로 강제 재스캔"
 
         exclude_set = set(exclude_names or [])
         ext_set = set(e.lower() for e in allowed_exts) if allowed_exts else None
@@ -425,11 +441,21 @@ class Api:
                 candidates.append((os.path.join(dirpath, fname), fname, ext))
 
         total = len(candidates)
+        reused_count = [0]
 
         def read_one(item):
             full_path, fname, ext = item
             try:
                 st = os.stat(full_path)
+                mtime_ms = int(st.st_mtime * 1000)
+                cached_doc = cached_by_path.get(full_path)
+                if (
+                    cached_doc is not None
+                    and cached_doc.get("mtime") == mtime_ms
+                    and cached_doc.get("size") == st.st_size
+                ):
+                    reused_count[0] += 1
+                    return cached_doc
                 content = read_text(full_path) if st.st_size <= MAX_FILE_BYTES else ""
                 rel_path = os.path.relpath(full_path, root_path).replace("\\", "/")
                 return {
@@ -437,7 +463,7 @@ class Api:
                     "fullPath": full_path,
                     "name": fname,
                     "ext": ext,
-                    "mtime": int(st.st_mtime * 1000),
+                    "mtime": mtime_ms,
                     "size": st.st_size,
                     "content": content,
                 }
@@ -461,6 +487,15 @@ class Api:
                     except Exception:
                         pass
                     chunk = []
+
+        if cache_note is None:
+            stale = total - reused_count[0]
+            cache_note = "no changes" if stale == 0 else f"{stale}/{total} files re-read (new/changed)"
+        try:
+            source = "cache" if reused_count[0] == total and total > 0 else "live"
+            self._window.evaluate_js(f"window.onScanSource({json.dumps(source)}, {json.dumps(cache_note)})")
+        except Exception:
+            pass
 
         self._index_docs(root_path, all_docs)
         save_scan_cache(root_path, allowed_exts, exclude_names, total, chunk_json_strings)
