@@ -371,8 +371,30 @@
     return true;
   }
 
-  async function scan() {
+  // Caches the scanned doc list per folder (+ filter settings) for this
+  // session, keyed by currentRef (a path string on desktop, a
+  // FileSystemDirectoryHandle on web - history chips always reuse the same
+  // handle instance, so this works for both). Switching back to a folder
+  // you already read this session is then instant instead of re-reading
+  // everything from disk, unless the extension/exclude filters changed.
+  var scanCache = new Map();
+
+  function filterKey() {
+    return JSON.stringify(allowedExts()) + '|' + JSON.stringify(excludedFolderNames());
+  }
+
+  async function scan(forceRefresh) {
     if (!currentRef) return;
+
+    var fkey = filterKey();
+    var cached = scanCache.get(currentRef);
+    if (!forceRefresh && cached && cached.filterKey === fkey) {
+      docs = cached.docs;
+      resultStatus.textContent = docs.length + '개 파일 인덱싱됨 (캐시됨).';
+      runSearch();
+      return;
+    }
+
     pickBtn.disabled = true;
     refreshBtn.disabled = true;
     queryInput.disabled = true;
@@ -382,6 +404,7 @@
 
     try {
       docs = await Backend.scanFolder(currentRef, allowedExts(), excludedFolderNames());
+      scanCache.set(currentRef, { filterKey: fkey, docs: docs });
     } catch (err) {
       progressLabel.textContent = '폴더를 읽는 중 오류: ' + err;
       docs = [];
@@ -400,7 +423,7 @@
     if (applyFolderResult(result)) await scan();
   });
 
-  refreshBtn.addEventListener('click', function () { scan(); });
+  refreshBtn.addEventListener('click', function () { scan(true); });
 
   function renderHistoryChips(history) {
     historyRowEl.innerHTML = '';
