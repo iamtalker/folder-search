@@ -165,13 +165,16 @@
       return entry.path === ref;
     },
     scanFolder: async function (ref, exts, excludeNames) {
-      // main.py streams results in small chunks via window.onScanChunk as it
-      // reads (instead of marshalling one huge list across the JS bridge at
-      // the very end), so the page can start showing results the moment
+      // main.py streams results in chunks via window.onScanChunk as it reads
+      // (instead of marshalling one huge list across the JS bridge at the
+      // very end), so the page can start showing results the moment
       // scanning finishes instead of pausing afterward to receive it all.
+      // Progress rides along in the same call to halve the number of
+      // Python<->JS round trips.
       var collected = [];
-      window.onScanChunk = function (chunk) {
+      window.onScanChunk = function (chunk, done, total) {
         for (var i = 0; i < chunk.length; i++) collected.push(chunk[i]);
+        window.onScanProgress(done, total);
       };
       await pywebview.api.scan_folder(ref, exts, excludeNames);
       window.onScanChunk = function () {};
