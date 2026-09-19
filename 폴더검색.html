@@ -113,7 +113,7 @@
   var setupEl = document.getElementById('setup');
 
   var currentRef = null;   // path string (desktop) or FileSystemDirectoryHandle (web)
-  var docs = [];           // { path, name, ext, mtime, content, size, ... }
+  var totalCount = 0;      // how many files the current folder indexed in total
   var sortMode = 'relevance';
   var MAX_RESULTS_SHOWN = 200;
 
@@ -161,6 +161,11 @@
 
   var DesktopBackend = {
     openLinkLabel: '기본 프로그램으로 열기',
+    // Python only ever holds one folder's documents at a time (self._docs),
+    // so a JS-side "switch back to this folder instantly" cache would lie
+    // about what's actually loaded server-side. main.py's own on-disk cache
+    // already makes revisiting a folder fast; see its scan_folder docstring.
+    usesSessionCache: false,
 
     init: async function () {
       return { history: await pywebview.api.get_history() };
@@ -178,22 +183,18 @@
       return entry.path === ref;
     },
     scanFolder: async function (ref, exts, excludeNames, forceRefresh) {
-      // main.py streams results in chunks via window.onScanChunk as it reads
-      // (instead of marshalling one huge list across the JS bridge at the
-      // very end), so the page can start showing results the moment
-      // scanning finishes instead of pausing afterward to receive it all.
-      // Progress rides along in the same call to halve the number of
-      // Python<->JS round trips. Unless forceRefresh, main.py may also
-      // serve this from its own on-disk cache from a previous run of the
-      // app, using the same chunked protocol either way.
-      var collected = [];
-      window.onScanChunk = function (chunk, done, total) {
-        for (var i = 0; i < chunk.length; i++) collected.push(chunk[i]);
-        window.onScanProgress(done, total);
-      };
-      await pywebview.api.scan_folder(ref, exts, excludeNames, !!forceRefresh);
-      window.onScanChunk = function () {};
-      return collected;
+      // main.py reads (or loads from its own on-disk cache) the full file
+      // content and keeps it server-side - it is deliberately never sent
+      // here. Only progress numbers cross the bridge during a scan; see
+      // runSearch() below for why, and main.py's scan_folder docstring for
+      // the measurements behind it.
+      return await pywebview.api.scan_folder(ref, exts, excludeNames, !!forceRefresh);
+    },
+    runSearch: async function (ref, query, sortMode) {
+      return await pywebview.api.search(ref, query, sortMode);
+    },
+    getFileContent: async function (ref, doc) {
+      return await pywebview.api.get_file_content(ref, doc.path);
     },
     openFile: async function (doc) {
       return await pywebview.api.open_file(doc.fullPath);
@@ -206,6 +207,8 @@
     MAX_HISTORY: 8,
     DB_NAME: 'folder-search-db',
     STORE: 'handles',
+    _docs: [],
+    usesSessionCache: true,
 
     openDB: function () {
       var self = this;
@@ -356,20 +359,63 @@
         window.onScanProgress(Math.min(i + CHUNK, total), total);
         await new Promise(function (r) { setTimeout(r, 0); }); // yield to UI
       }
-      return newDocs;
+      this._docs = newDocs;
+      return newDocs.length;
+    },
+
+    // The web version has no Python<->JS bridge to worry about (everything
+    // already lives in this same JS heap), so unlike DesktopBackend it just
+    // runs the shared boolean-parser/scorer/snippet functions directly
+    // in-process against the full content it already holds.
+    runSearch: async function (ref, query, sortMode) {
+      var q = (query || '').trim();
+      var node = q ? parseQuery(q) : null;
+      var positiveWords = [];
+      if (node) collectPositiveWords(node, positiveWords);
+
+      var matched = this._docs.filter(function (doc) {
+        if (!node) return true;
+        var haystack = (doc.name + '\n' + doc.content).toLowerCase();
+        return evalNode(node, haystack);
+      });
+
+      if (sortMode === 'relevance' && q) {
+        matched.forEach(function (d) { d._score = score(d, positiveWords, q); });
+        matched.sort(function (a, b) { return b._score - a._score; });
+      } else {
+        matched.sort(function (a, b) { return b.mtime - a.mtime; });
+      }
+
+      var results = matched.slice(0, MAX_RESULTS_SHOWN).map(function (doc) {
+        return {
+          path: doc.path, name: doc.name, ext: doc.ext, mtime: doc.mtime, size: doc.size,
+          score: typeof doc._score === 'number' ? doc._score : null,
+          snippet: snippetAround(doc.content, positiveWords, 120),
+          matchedWords: positiveWords,
+          fileHandle: doc.fileHandle
+        };
+      });
+      return { total: this._docs.length, matchedTotal: matched.length, results: results };
+    },
+    getFileContent: async function (ref, doc) {
+      var found = this._docs.filter(function (d) { return d.path === doc.path; })[0];
+      return found ? found.content : null;
     },
 
     openFile: async function (doc) {
       try {
         var url;
-        if (doc.content) {
+        var found = this._docs.filter(function (d) { return d.path === doc.path; })[0];
+        if (found && found.content) {
           // use the already-decoded text so the browser doesn't have to guess
           // the encoding (it often guesses wrong for Korean text otherwise)
-          var blob = new Blob([doc.content], { type: 'text/plain;charset=utf-8' });
+          var blob = new Blob([found.content], { type: 'text/plain;charset=utf-8' });
           url = URL.createObjectURL(blob);
-        } else {
-          var file = await doc.fileHandle.getFile();
+        } else if (found) {
+          var file = await found.fileHandle.getFile();
           url = URL.createObjectURL(file);
+        } else {
+          return false;
         }
         window.open(url, '_blank');
         return true;
@@ -405,12 +451,14 @@
     if (!currentRef) return;
 
     var fkey = filterKey();
-    var cached = scanCache.get(currentRef);
-    if (!forceRefresh && cached && cached.filterKey === fkey) {
-      docs = cached.docs;
-      lastIndexLabel = docs.length + '개 파일 인덱싱됨 (이 세션 메모리 캐시, 0ms)';
-      runSearch();
-      return;
+    if (Backend.usesSessionCache) {
+      var cached = scanCache.get(currentRef);
+      if (!forceRefresh && cached && cached.filterKey === fkey) {
+        totalCount = cached.total;
+        lastIndexLabel = totalCount + '개 파일 인덱싱됨 (이 세션 메모리 캐시, 0ms)';
+        await runSearch();
+        return;
+      }
     }
 
     pickBtn.disabled = true;
@@ -423,11 +471,11 @@
     var t0 = performance.now();
 
     try {
-      docs = await Backend.scanFolder(currentRef, allowedExts(), excludedFolderNames(), !!forceRefresh);
-      scanCache.set(currentRef, { filterKey: fkey, docs: docs });
+      totalCount = await Backend.scanFolder(currentRef, allowedExts(), excludedFolderNames(), !!forceRefresh);
+      if (Backend.usesSessionCache) scanCache.set(currentRef, { filterKey: fkey, total: totalCount });
     } catch (err) {
       progressLabel.textContent = '폴더를 읽는 중 오류: ' + err;
-      docs = [];
+      totalCount = 0;
     }
 
     var elapsed = ((performance.now() - t0) / 1000).toFixed(2);
@@ -444,8 +492,8 @@
     pickBtn.disabled = false;
     refreshBtn.disabled = false;
     queryInput.disabled = false;
-    lastIndexLabel = docs.length + '개 파일 인덱싱됨' + sourceLabel;
-    runSearch();
+    lastIndexLabel = totalCount + '개 파일 인덱싱됨' + sourceLabel;
+    await runSearch();
   }
 
   pickBtn.addEventListener('click', async function () {
@@ -665,45 +713,40 @@
     return (bytes / 1024 / 1024).toFixed(1) + 'MB';
   }
 
-  function runSearch() {
+  // Delegates to Backend.runSearch, which either asks Python to search
+  // server-side (desktop - see main.py's search()) or filters/scores/sorts
+  // this.​_docs in-process (web). Either way it comes back as a small,
+  // already-paginated list with a snippet per result, not full content.
+  var searchSeq = 0;
+  async function runSearch() {
     var q = queryInput.value.trim();
-    var node = q ? parseQuery(q) : null;
-    var positiveWords = [];
-    if (node) collectPositiveWords(node, positiveWords);
-
-    var matched = docs.filter(function (doc) {
-      if (!node) return true;
-      var haystack = (doc.name + '\n' + doc.content).toLowerCase();
-      return evalNode(node, haystack);
-    });
-
-    if (sortMode === 'relevance' && q) {
-      matched.forEach(function (d) { d._score = score(d, positiveWords, q); });
-      matched.sort(function (a, b) { return b._score - a._score; });
-    } else {
-      matched.sort(function (a, b) { return b.mtime - a.mtime; });
-    }
+    var mySeq = ++searchSeq;
+    var result = await Backend.runSearch(currentRef, q, sortMode);
+    if (mySeq !== searchSeq) return; // a newer search finished first, drop this stale one
 
     resultStatus.textContent = (lastIndexLabel ? lastIndexLabel + ' · ' : '') +
-      docs.length + '개 중 ' + matched.length + '개 일치' +
-      (matched.length > MAX_RESULTS_SHOWN ? ' (상위 ' + MAX_RESULTS_SHOWN + '개만 표시)' : '');
+      result.total + '개 중 ' + result.matchedTotal + '개 일치' +
+      (result.matchedTotal > MAX_RESULTS_SHOWN ? ' (상위 ' + MAX_RESULTS_SHOWN + '개만 표시)' : '');
 
-    renderResults(matched.slice(0, MAX_RESULTS_SHOWN), positiveWords);
+    renderResults(result.results);
   }
 
-  function renderResults(list, words) {
+  function renderResults(list) {
     resultsEl.innerHTML = '';
     list.forEach(function (doc) {
+      var words = doc.matchedWords || [];
       var div = document.createElement('div');
       div.className = 'result';
 
       var pathEl = document.createElement('div');
       pathEl.className = 'path';
       pathEl.innerHTML = highlight(doc.path, words);
-      pathEl.addEventListener('click', function () {
+      pathEl.addEventListener('click', async function () {
         div.classList.toggle('expanded');
         if (div.classList.contains('expanded') && !fullEl.dataset.filled) {
-          fullEl.innerHTML = highlight(doc.content || '(내용 없음 또는 너무 큰 파일)', words);
+          fullEl.textContent = '불러오는 중...';
+          var content = await Backend.getFileContent(currentRef, doc);
+          fullEl.innerHTML = highlight(content || '(내용 없음 또는 너무 큰 파일)', words);
           fullEl.dataset.filled = '1';
         }
       });
@@ -723,12 +766,12 @@
 
       var meta = document.createElement('div');
       meta.className = 'meta';
-      meta.textContent = fmtDate(doc.mtime) + ' · ' + fmtSize(doc.size) + (typeof doc._score === 'number' ? ' · 점수 ' + doc._score : '');
+      meta.textContent = fmtDate(doc.mtime) + ' · ' + fmtSize(doc.size) + (typeof doc.score === 'number' ? ' · 점수 ' + doc.score : '');
       div.appendChild(meta);
 
       var snippet = document.createElement('div');
       snippet.className = 'snippet';
-      snippet.innerHTML = highlight(snippetAround(doc.content, words, 120), words);
+      snippet.innerHTML = highlight(doc.snippet || '', words);
       div.appendChild(snippet);
 
       var fullEl = document.createElement('div');

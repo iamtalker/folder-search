@@ -11,6 +11,7 @@ the browser's File System Access API has for Documents/Desktop/Downloads.
 import hashlib
 import json
 import os
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 import webview
@@ -21,6 +22,158 @@ CACHE_DIR = os.path.join(APP_DIR, "cache")
 MAX_FILE_BYTES = 3 * 1024 * 1024
 MAX_HISTORY = 8
 SCAN_CHUNK = 200
+MAX_RESULTS_SHOWN = 200
+
+
+# =============================================================================
+# Boolean query parser / scorer / snippet extraction - a straight Python port
+# of the same logic in 폴더검색.html (tokenize/parseQuery/evalNode/
+# collectPositiveWords/score/snippetAround). Ported here, rather than shared,
+# because of *why* search moved server-side at all: sending every file's full
+# content to the JS side (so it could search client-side, like the web
+# version still does) meant marshalling ~200MB+ across the Python<->WebView2
+# bridge on every scan of a large folder, which measured out to several
+# extra seconds versus the web version - which has no such bridge at all.
+# Searching here instead means only small result pages (with a short
+# snippet, not full content) ever cross that bridge.
+# =============================================================================
+
+_TOKEN_RE = re.compile(r'"([^"]*)"|\(|\)|\bAND\b|\bOR\b|\bNOT\b|\S+')
+
+
+def tokenize_query(q):
+    tokens = []
+    for m in _TOKEN_RE.finditer(q):
+        t = m.group(0)
+        if t in ("(", ")"):
+            tokens.append({"type": t})
+        elif t in ("AND", "OR", "NOT"):
+            tokens.append({"type": t})
+        elif m.group(1) is not None:
+            tokens.append({"type": "WORD", "value": m.group(1)})
+        else:
+            tokens.append({"type": "WORD", "value": t})
+    return tokens
+
+
+def parse_query(q):
+    tokens = tokenize_query(q)
+    if not tokens:
+        return None
+    pos = [0]
+
+    def peek():
+        return tokens[pos[0]] if pos[0] < len(tokens) else None
+
+    def nxt():
+        t = tokens[pos[0]]
+        pos[0] += 1
+        return t
+
+    def parse_or():
+        node = parse_and()
+        while peek() and peek()["type"] == "OR":
+            nxt()
+            node = {"op": "OR", "left": node, "right": parse_and()}
+        return node
+
+    def parse_and():
+        node = parse_factor()
+        while peek() and peek()["type"] in ("AND", "NOT", "WORD", "("):
+            op = "AND"
+            if peek()["type"] in ("AND", "NOT"):
+                op = nxt()["type"]
+            right = parse_factor()
+            if right is None:
+                break
+            node = {"op": op, "left": node, "right": right}
+        return node
+
+    def parse_factor():
+        t = peek()
+        if t is None:
+            return None
+        if t["type"] == "(":
+            nxt()
+            node = parse_or()
+            if peek() and peek()["type"] == ")":
+                nxt()
+            return node
+        if t["type"] == "WORD":
+            nxt()
+            return {"op": "WORD", "value": t["value"].lower()}
+        return None
+
+    return parse_or()
+
+
+def eval_node(node, haystack):
+    if node is None:
+        return True
+    op = node["op"]
+    if op == "WORD":
+        return node["value"] in haystack
+    if op == "AND":
+        return eval_node(node["left"], haystack) and eval_node(node["right"], haystack)
+    if op == "OR":
+        return eval_node(node["left"], haystack) or eval_node(node["right"], haystack)
+    if op == "NOT":
+        return eval_node(node["left"], haystack) and not eval_node(node["right"], haystack)
+    return True
+
+
+def collect_positive_words(node, out):
+    if node is None:
+        return
+    if node["op"] == "WORD":
+        out.append(node["value"])
+        return
+    if node["op"] == "NOT":
+        collect_positive_words(node["left"], out)  # skip the excluded side
+        return
+    collect_positive_words(node["left"], out)
+    collect_positive_words(node["right"], out)
+
+
+def count_occurrences(haystack, needle):
+    if not needle:
+        return 0
+    count = 0
+    idx = 0
+    while True:
+        idx = haystack.find(needle, idx)
+        if idx == -1:
+            return count
+        count += 1
+        idx += len(needle)
+
+
+def score_doc(doc, positive_words, raw_query):
+    haystack = doc["_haystack"]
+    s = sum(count_occurrences(haystack, w) for w in positive_words)
+    lname = doc["name"].lower()
+    q = raw_query.strip().lower()
+    if q and (lname == q or lname == q + "." + doc["ext"]):
+        s += 1000
+    elif q and q in lname:
+        s += 50
+    return s
+
+
+def snippet_around(content, words, radius):
+    if not content:
+        return ""
+    lower = content.lower()
+    idx = -1
+    for w in words:
+        idx = lower.find(w)
+        if idx != -1:
+            break
+    if idx == -1:
+        return content[:radius * 2]
+    start = max(0, idx - radius)
+    end = min(len(content), idx + radius)
+    return ("…" if start > 0 else "") + content[start:end] + ("…" if end < len(content) else "")
 
 
 def cache_file_for(path):
@@ -111,6 +264,9 @@ class Api:
         # live Window's native WebView2/winforms internals and blow the
         # stack (this is what was causing the slow-close bug).
         self._window = None
+        self._docs = []        # currently-loaded folder's documents (kept
+                                # server-side; see search())
+        self._docs_root = None  # which folder self._docs belongs to
 
     def _add_history(self, path):
         name = os.path.basename(path.rstrip("\\/")) or path
@@ -164,29 +320,23 @@ class Api:
             cache below and always re-reads from the filesystem.
 
         Unless force_refresh, first checks a per-folder cache file on disk
-        (data/cache/<md5 of path>.json) saved from a previous run, so
+        (desktop/cache/<md5 of path>.json) saved from a previous run, so
         closing and reopening the app doesn't mean reading everything from
-        disk again - the page already has its own in-memory cache for
-        switching folders within one running session, but that memory is
-        gone once the app restarts. The disk cache is a straight dict
-        match on the current ext/exclude filters; it's discarded whenever
-        that folder is dropped from history or "새로고침" is pressed.
+        disk again.
 
-        Streams both progress AND the actual document data to the page in
-        chunks via a single window.evaluate_js call per chunk
-        (window.onScanChunk(chunk, done, total)), instead of building the
-        whole list in memory and marshalling it across the JS bridge in one
-        huge call at the end - for a folder with thousands of files that
-        final one-shot transfer is what caused the visible pause between
-        "done reading" and "search actually works". Two more things that
-        turned out to matter once measured against a real 8000+ file
-        folder: reading files with a thread pool (I/O-bound, so Python's
-        GIL isn't in the way) cut the read time by ~40%, and each
-        evaluate_js call has enough fixed overhead that halving the call
-        count (one merged call instead of two) and using bigger chunks
-        (fewer, larger calls) both measurably helped.
-        The return value is just a completion count; the page already has
-        everything it needs by the time this returns.
+        Reads (or loads from cache) the full document set, including file
+        content, and keeps it server-side in self._docs - it does NOT send
+        that content to the page. Search runs here too (see search()) for
+        exactly that reason: earlier versions streamed every file's content
+        to the page so it could search client-side like the web version
+        does, but marshalling that much data (~200MB+ for a large folder)
+        across the Python<->WebView2 bridge measured out to several extra
+        seconds versus the web version, which has no such bridge. Only
+        window.onScanProgress(done, total) - two small numbers - crosses
+        the bridge during a scan now; search results (small, paginated,
+        with a short snippet rather than full content) are the only other
+        thing that does.
+        The return value is just the total file count.
         """
         if not force_refresh:
             cached = load_scan_cache(root_path)
@@ -195,15 +345,16 @@ class Api:
                 meta, chunk_lines = cached
                 if meta.get("exts") == allowed_exts and meta.get("excludes") == exclude_names:
                     total = meta.get("total", 0)
+                    docs = []
                     done = 0
                     for chunk_json in chunk_lines:
+                        docs.extend(json.loads(chunk_json))
                         done = min(done + SCAN_CHUNK, total)
                         try:
-                            self._window.evaluate_js(
-                                f"window.onScanChunk({chunk_json}, {done}, {total})"
-                            )
+                            self._window.evaluate_js(f"window.onScanProgress({done}, {total})")
                         except Exception:
                             pass
+                    self._index_docs(root_path, docs)
                     try:
                         self._window.evaluate_js("window.onScanSource('cache')")
                     except Exception:
@@ -257,27 +408,83 @@ class Api:
             except OSError:
                 return None
 
-        chunk = []
+        all_docs = []
         chunk_json_strings = []
+        chunk = []
         done = 0
         with ThreadPoolExecutor(max_workers=16) as pool:
             for doc in pool.map(read_one, candidates):
                 done += 1
                 if doc is not None:
+                    all_docs.append(doc)
                     chunk.append(doc)
                 if done % SCAN_CHUNK == 0 or done == total:
-                    chunk_json = json.dumps(chunk)
+                    chunk_json_strings.append(json.dumps(chunk))
                     try:
-                        self._window.evaluate_js(
-                            f"window.onScanChunk({chunk_json}, {done}, {total})"
-                        )
+                        self._window.evaluate_js(f"window.onScanProgress({done}, {total})")
                     except Exception:
                         pass
-                    chunk_json_strings.append(chunk_json)
                     chunk = []
 
+        self._index_docs(root_path, all_docs)
         save_scan_cache(root_path, allowed_exts, exclude_names, total, chunk_json_strings)
         return total
+
+    def _index_docs(self, root_path, docs):
+        for d in docs:
+            d["_haystack"] = (d["name"] + "\n" + d["content"]).lower()
+        self._docs = docs
+        self._docs_root = root_path
+
+    def search(self, root_path, query, sort_mode):
+        """
+        Runs entirely server-side against self._docs (populated by
+        scan_folder) and returns only a small page of results - see
+        scan_folder's docstring for why. Mirrors 폴더검색.html's WebBackend
+        search logic (tokenize/parseQuery/evalNode/score/snippet) exactly,
+        just in Python instead of JS.
+        """
+        if root_path != self._docs_root:
+            return {"total": 0, "matchedTotal": 0, "results": []}
+
+        q = (query or "").strip()
+        node = parse_query(q) if q else None
+        positive_words = []
+        if node:
+            collect_positive_words(node, positive_words)
+
+        matched = [d for d in self._docs if node is None or eval_node(node, d["_haystack"])]
+
+        scores = None
+        if sort_mode == "relevance" and q:
+            scores = {id(d): score_doc(d, positive_words, q) for d in matched}
+            matched.sort(key=lambda d: -scores[id(d)])
+        else:
+            matched.sort(key=lambda d: -d["mtime"])
+
+        matched_total = len(matched)
+        results = []
+        for d in matched[:MAX_RESULTS_SHOWN]:
+            results.append({
+                "path": d["path"],
+                "fullPath": d["fullPath"],
+                "name": d["name"],
+                "ext": d["ext"],
+                "mtime": d["mtime"],
+                "size": d["size"],
+                "score": scores[id(d)] if scores else None,
+                "snippet": snippet_around(d["content"], positive_words, 120),
+                "matchedWords": positive_words,
+            })
+        return {"total": len(self._docs), "matchedTotal": matched_total, "results": results}
+
+    def get_file_content(self, root_path, path):
+        if root_path != self._docs_root:
+            return None
+        for d in self._docs:
+            if d["path"] == path:
+                return d["content"]
+        return None
 
 
 def main():
