@@ -438,7 +438,10 @@
         return {
           path: doc.path, name: doc.name, ext: doc.ext, mtime: doc.mtime, size: doc.size,
           score: typeof doc._score === 'number' ? doc._score : null,
-          snippet: snippetAround(doc.content, positiveWords, 120),
+          // doc._haystack is "name\ncontent" lowercased; skip past the name
+          // and the separator to get the already-lowercased content instead
+          // of lowercasing it again here.
+          snippet: snippetAround(doc.content, doc._haystack.slice(doc.name.length + 1), positiveWords, 120),
           matchedWords: positiveWords,
           fileHandle: doc.fileHandle
         };
@@ -490,6 +493,7 @@
   // you already read this session is then instant instead of re-reading
   // everything from disk, unless the extension/exclude filters changed.
   var scanCache = new Map();
+  var SESSION_CACHE_LIMIT = 3; // folders' worth of docs to keep in memory at once
 
   function filterKey() {
     return JSON.stringify(allowedExts()) + '|' + JSON.stringify(excludedFolderNames());
@@ -527,7 +531,14 @@
 
     try {
       totalCount = await Backend.scanFolder(currentRef, allowedExts(), excludedFolderNames(), !!forceRefresh);
-      if (Backend.usesSessionCache) scanCache.set(currentRef, { filterKey: fkey, total: totalCount, docs: Backend._docs });
+      if (Backend.usesSessionCache) {
+        scanCache.set(currentRef, { filterKey: fkey, total: totalCount, docs: Backend._docs });
+        // now that a cache entry holds the full doc array (+ each doc's
+        // _haystack), it's real memory per folder, not just a number - cap
+        // how many folders we hold onto at once. Map keeps insertion order,
+        // so the oldest entry is always the first key.
+        while (scanCache.size > SESSION_CACHE_LIMIT) scanCache.delete(scanCache.keys().next().value);
+      }
     } catch (err) {
       progressLabel.textContent = '폴더를 읽는 중 오류: ' + err;
       totalCount = 0;
@@ -762,9 +773,9 @@
     });
   }
 
-  function snippetAround(content, words, radius) {
+  function snippetAround(content, lowerContent, words, radius) {
     if (!content) return '';
-    var lower = content.toLowerCase();
+    var lower = lowerContent;
     var idx = -1;
     for (var i = 0; i < words.length && idx === -1; i++) {
       idx = lower.indexOf(words[i]);
