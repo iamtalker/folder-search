@@ -76,9 +76,3 @@ MIT
 
 - [iamtalker](https://github.com/iamtalker)
 - [Claude](https://claude.com/claude-code) (Anthropic) — pair-programmed the whole thing, from the first version through the performance rework and the exe packaging
-
-## 다음 할 일 / Next up
-
-**캐시 변경 감지 (진행 예정)**: 지금 데스크톱 캐시(`desktop/cache/`)는 확장자/제외 필터만 확인하고 파일이 그 뒤에 바뀌었는지는 검사하지 않습니다 — 🔄 새로고침을 눌러야만 최신 내용이 반영됩니다. 다음 개선은 캐시에 이미 저장된 각 파일의 `mtime`/`size`를 실제 파일과 비교해서, **바뀌었거나 새로 생겼거나 삭제된 파일만 재스캔**하고 나머지는 캐시를 그대로 쓰는 것 — 새로고침 없이도 항상 최신 상태를 보여주면서 전체 재스캔 비용은 안 드는 방향입니다. (2026-09-19, ChatGPT 코드 리뷰에서 제안됨 → 검토 후 합의)
-
-**Cache staleness detection (planned)**: the desktop cache currently only checks the extension/exclude filters, not whether files changed since it was written — you have to press 🔄 Refresh to see updates. The next improvement is to compare each cached file's stored `mtime`/`size` against the real file, and only re-scan files that changed, were added, or were deleted, reusing the cache for everything else — always up to date without needing a full re-scan. (Proposed 2026-09-19 via a ChatGPT code review, reviewed and agreed on.)
