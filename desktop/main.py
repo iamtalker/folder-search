@@ -8,6 +8,7 @@ Uses the OS's native folder picker and reads files directly via Python's
 filesystem APIs, so there is no "this folder is blocked" restriction like
 the browser's File System Access API has for Documents/Desktop/Downloads.
 """
+import hashlib
 import json
 import os
 import sys
@@ -16,8 +17,59 @@ import webview
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 HISTORY_FILE = os.path.join(APP_DIR, "history.json")
+CACHE_DIR = os.path.join(APP_DIR, "cache")
 MAX_FILE_BYTES = 3 * 1024 * 1024
 MAX_HISTORY = 8
+SCAN_CHUNK = 200
+
+
+def cache_file_for(path):
+    h = hashlib.md5(path.encode("utf-8")).hexdigest()
+    return os.path.join(CACHE_DIR, h + ".json")
+
+
+def load_scan_cache(path):
+    """
+    Returns (meta, chunk_json_strings) or None. Each entry in
+    chunk_json_strings is already a ready-to-send JSON array - the file is
+    stored pre-chunked (one metadata line, then one already-serialized
+    chunk per line) specifically so loading from cache never needs to
+    json.loads() the (possibly 100MB+) document data and then json.dumps()
+    it straight back out again just to hand it to evaluate_js. That
+    parse-then-reserialize round trip was, once measured, over half the
+    cost of a "cached" load.
+    """
+    cf = cache_file_for(path)
+    if not os.path.exists(cf):
+        return None
+    try:
+        with open(cf, "r", encoding="utf-8") as f:
+            meta = json.loads(f.readline())
+            chunk_lines = [line.rstrip("\n") for line in f if line.strip()]
+        return meta, chunk_lines
+    except (OSError, ValueError):
+        return None
+
+
+def save_scan_cache(path, allowed_exts, exclude_names, total, chunk_json_strings):
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        meta = {"exts": allowed_exts, "excludes": exclude_names, "total": total}
+        with open(cache_file_for(path), "w", encoding="utf-8") as f:
+            f.write(json.dumps(meta) + "\n")
+            for s in chunk_json_strings:
+                f.write(s + "\n")
+    except OSError:
+        pass
+
+
+def delete_scan_cache(path):
+    try:
+        cf = cache_file_for(path)
+        if os.path.exists(cf):
+            os.remove(cf)
+    except OSError:
+        pass
 
 
 def load_history():
@@ -64,6 +116,10 @@ class Api:
         name = os.path.basename(path.rstrip("\\/")) or path
         history = [h for h in load_history() if h.get("path") != path]
         history.insert(0, {"path": path, "name": name})
+        # anything pushed out of the remembered list no longer needs its
+        # scan cache kept around either
+        for dropped in history[MAX_HISTORY:]:
+            delete_scan_cache(dropped["path"])
         history = history[:MAX_HISTORY]
         save_history(history)
         return history
@@ -74,6 +130,7 @@ class Api:
     def remove_history(self, path):
         history = [h for h in load_history() if h.get("path") != path]
         save_history(history)
+        delete_scan_cache(path)
         return history
 
     def pick_folder(self):
@@ -99,10 +156,21 @@ class Api:
         except OSError:
             return False
 
-    def scan_folder(self, root_path, allowed_exts, exclude_names):
+    def scan_folder(self, root_path, allowed_exts, exclude_names, force_refresh=False):
         """
         allowed_exts: list[str] lowercase, no dot, or None/[] for "allow all"
         exclude_names: list[str] of directory names to skip anywhere in the tree
+        force_refresh: True (the page's "새로고침" button) skips the on-disk
+            cache below and always re-reads from the filesystem.
+
+        Unless force_refresh, first checks a per-folder cache file on disk
+        (data/cache/<md5 of path>.json) saved from a previous run, so
+        closing and reopening the app doesn't mean reading everything from
+        disk again - the page already has its own in-memory cache for
+        switching folders within one running session, but that memory is
+        gone once the app restarts. The disk cache is a straight dict
+        match on the current ext/exclude filters; it's discarded whenever
+        that folder is dropped from history or "새로고침" is pressed.
 
         Streams both progress AND the actual document data to the page in
         chunks via a single window.evaluate_js call per chunk
@@ -120,6 +188,23 @@ class Api:
         The return value is just a completion count; the page already has
         everything it needs by the time this returns.
         """
+        if not force_refresh:
+            cached = load_scan_cache(root_path)
+            if cached:
+                meta, chunk_lines = cached
+                if meta.get("exts") == allowed_exts and meta.get("excludes") == exclude_names:
+                    total = meta.get("total", 0)
+                    done = 0
+                    for chunk_json in chunk_lines:
+                        done = min(done + SCAN_CHUNK, total)
+                        try:
+                            self._window.evaluate_js(
+                                f"window.onScanChunk({chunk_json}, {done}, {total})"
+                            )
+                        except Exception:
+                            pass
+                    return total
+
         exclude_set = set(exclude_names or [])
         ext_set = set(e.lower() for e in allowed_exts) if allowed_exts else None
 
@@ -138,7 +223,6 @@ class Api:
                 candidates.append((os.path.join(dirpath, fname), fname, ext))
 
         total = len(candidates)
-        CHUNK = 200
 
         def read_one(item):
             full_path, fname, ext = item
@@ -159,21 +243,25 @@ class Api:
                 return None
 
         chunk = []
+        chunk_json_strings = []
         done = 0
         with ThreadPoolExecutor(max_workers=16) as pool:
             for doc in pool.map(read_one, candidates):
                 done += 1
                 if doc is not None:
                     chunk.append(doc)
-                if done % CHUNK == 0 or done == total:
+                if done % SCAN_CHUNK == 0 or done == total:
+                    chunk_json = json.dumps(chunk)
                     try:
                         self._window.evaluate_js(
-                            f"window.onScanChunk({json.dumps(chunk)}, {done}, {total})"
+                            f"window.onScanChunk({chunk_json}, {done}, {total})"
                         )
                     except Exception:
                         pass
+                    chunk_json_strings.append(chunk_json)
                     chunk = []
 
+        save_scan_cache(root_path, allowed_exts, exclude_names, total, chunk_json_strings)
         return total
 
 
