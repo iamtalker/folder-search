@@ -392,7 +392,13 @@
               mtime: file.lastModified,
               size: file.size,
               content: content,
-              fileHandle: e.handle
+              fileHandle: e.handle,
+              // built once here instead of per-keystroke in runSearch/score -
+              // for a large folder this string is tens of MB across all
+              // docs, and re-lowercasing it on every search was the biggest
+              // single cost of typing a query (see DesktopBackend's Python
+              // side, which already caches this the same way at scan time)
+              _haystack: (e.name + '\n' + content).toLowerCase()
             });
           } catch (err) { /* unreadable file, skip */ }
         }));
@@ -417,8 +423,7 @@
         if (dateFrom != null && doc.mtime < dateFrom) return false;
         if (dateTo != null && doc.mtime > dateTo) return false;
         if (!node) return true;
-        var haystack = (doc.name + '\n' + doc.content).toLowerCase();
-        return evalNode(node, haystack);
+        return evalNode(node, doc._haystack);
       });
 
       if (sortMode === 'relevance' && q) {
@@ -726,9 +731,8 @@
   }
 
   function score(doc, positiveWords, rawQuery) {
-    var haystack = (doc.name + '\n' + doc.content).toLowerCase();
     var s = 0;
-    positiveWords.forEach(function (w) { s += countOccurrences(haystack, w); });
+    positiveWords.forEach(function (w) { s += countOccurrences(doc._haystack, w); });
     var lname = doc.name.toLowerCase();
     var q = rawQuery.trim().toLowerCase();
     if (q && (lname === q || lname === q + '.' + doc.ext)) s += 1000;
