@@ -504,6 +504,12 @@
       var cached = scanCache.get(currentRef);
       if (!forceRefresh && cached && cached.filterKey === fkey) {
         totalCount = cached.total;
+        // Backend._docs is a single shared array (only one folder's worth
+        // at a time) - restore this folder's docs into it before searching,
+        // otherwise a scan of a *different* folder done since would still
+        // be sitting there and results would silently come from the wrong
+        // folder while the label/count still say this one.
+        Backend._docs = cached.docs;
         indexStatus.textContent = totalCount + '개 파일 인덱싱됨 (이 세션 메모리 캐시, 0ms)';
         await runSearch();
         return;
@@ -521,7 +527,7 @@
 
     try {
       totalCount = await Backend.scanFolder(currentRef, allowedExts(), excludedFolderNames(), !!forceRefresh);
-      if (Backend.usesSessionCache) scanCache.set(currentRef, { filterKey: fkey, total: totalCount });
+      if (Backend.usesSessionCache) scanCache.set(currentRef, { filterKey: fkey, total: totalCount, docs: Backend._docs });
     } catch (err) {
       progressLabel.textContent = '폴더를 읽는 중 오류: ' + err;
       totalCount = 0;
