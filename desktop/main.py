@@ -190,6 +190,7 @@ class Api:
         """
         if not force_refresh:
             cached = load_scan_cache(root_path)
+            cache_note = "no cache file"
             if cached:
                 meta, chunk_lines = cached
                 if meta.get("exts") == allowed_exts and meta.get("excludes") == exclude_names:
@@ -203,7 +204,21 @@ class Api:
                             )
                         except Exception:
                             pass
+                    try:
+                        self._window.evaluate_js("window.onScanSource('cache')")
+                    except Exception:
+                        pass
                     return total
+                cache_note = f"filter mismatch: cached={meta.get('exts')!r}/{meta.get('excludes')!r} vs requested={allowed_exts!r}/{exclude_names!r}"
+            try:
+                self._window.evaluate_js(f"window.onScanSource('live', {json.dumps(cache_note)})")
+            except Exception:
+                pass
+        else:
+            try:
+                self._window.evaluate_js("window.onScanSource('live', '새로고침으로 강제 재스캔')")
+            except Exception:
+                pass
 
         exclude_set = set(exclude_names or [])
         ext_set = set(e.lower() for e in allowed_exts) if allowed_exts else None

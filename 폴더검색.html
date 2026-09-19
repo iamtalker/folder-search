@@ -139,6 +139,15 @@
     progressLabel.textContent = done + ' / ' + total + '개 파일 읽음';
   };
 
+  // Set by the desktop backend so the status line can show whether a scan
+  // was actually served from main.py's on-disk cache or read live - added
+  // because from the progress bar alone (chunked either way) it's hard to
+  // tell caching is doing anything without a clock and a label.
+  var lastScanSource = null;
+  window.onScanSource = function (source, note) {
+    lastScanSource = { source: source, note: note || '' };
+  };
+
   // =====================================================================
   // Backend abstraction: same UI/search logic runs on top of either the
   // desktop app (pywebview -> Python does real filesystem access, no
@@ -395,7 +404,7 @@
     var cached = scanCache.get(currentRef);
     if (!forceRefresh && cached && cached.filterKey === fkey) {
       docs = cached.docs;
-      resultStatus.textContent = docs.length + '개 파일 인덱싱됨 (캐시됨).';
+      resultStatus.textContent = docs.length + '개 파일 인덱싱됨 (이 세션 메모리 캐시, 0ms).';
       runSearch();
       return;
     }
@@ -406,6 +415,8 @@
     progressWrap.style.display = 'flex';
     progressLabel.textContent = '파일 목록 확인 중...';
     progressBar.value = 0;
+    lastScanSource = null;
+    var t0 = performance.now();
 
     try {
       docs = await Backend.scanFolder(currentRef, allowedExts(), excludedFolderNames(), !!forceRefresh);
@@ -415,11 +426,21 @@
       docs = [];
     }
 
+    var elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+    var sourceLabel = '';
+    if (lastScanSource) {
+      sourceLabel = lastScanSource.source === 'cache'
+        ? ' (디스크 캐시에서 불러옴, ' + elapsed + '초)'
+        : ' (새로 스캔함, ' + elapsed + '초' + (lastScanSource.note ? ' - ' + lastScanSource.note : '') + ')';
+    } else {
+      sourceLabel = ' (' + elapsed + '초)';
+    }
+
     progressWrap.style.display = 'none';
     pickBtn.disabled = false;
     refreshBtn.disabled = false;
     queryInput.disabled = false;
-    resultStatus.textContent = docs.length + '개 파일 인덱싱됨.';
+    resultStatus.textContent = docs.length + '개 파일 인덱싱됨' + sourceLabel + '.';
     runSearch();
   }
 
