@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>폴더검색</title>
+<style>
+  :root {
+    --bg: #fff; --fg: #222; --muted: #777; --border: #ddd;
+    --accent: #2b73b7; --hl: #ff9; --card: #f7f7f7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#1e1e1e; --fg:#e5e5e5; --muted:#999; --border:#3a3a3a; --accent:#6cb2ff; --hl:#6b5b00; --card:#2a2a2a; }
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--fg); font-family: -apple-system, "Malgun Gothic", sans-serif; margin: 0; padding: 20px; }
+  h1 { font-size: 1.3em; margin: 0 0 14px; }
+  .panel { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 14px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .row:last-child { margin-bottom: 0; }
+  button { background: var(--accent); color: #fff; border: none; border-radius: 5px; padding: 7px 14px; cursor: pointer; font-size: 0.95em; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  input[type=text] { background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 5px; padding: 7px 10px; font-size: 0.95em; }
+  #query { flex: 1; min-width: 240px; }
+  #extFilter { width: 340px; }
+  .muted { color: var(--muted); font-size: 0.88em; }
+  .status { font-size: 0.9em; color: var(--muted); }
+  .sortbar { display: flex; gap: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; background: transparent; color: var(--accent); border: 1px solid var(--accent); border-radius: 14px; padding: 3px 6px 3px 12px; font-size: 0.85em; cursor: pointer; }
+  .chip:hover { background: var(--accent); color: #fff; }
+  .chip .x { opacity: 0.6; padding: 0 3px; border-radius: 50%; }
+  .chip .x:hover { opacity: 1; }
+  .chip.active { background: var(--accent); color: #fff; }
+  .sortbar button.active { outline: 2px solid var(--accent); }
+  #results { margin-top: 10px; }
+  .result { border-bottom: 1px solid var(--border); padding: 10px 2px; }
+  .result:last-child { border-bottom: none; }
+  .result .path { font-weight: bold; cursor: pointer; }
+  .result .path:hover { text-decoration: underline; }
+  .result .meta { color: var(--muted); font-size: 0.82em; margin: 2px 0 4px; }
+  .result .snippet { font-size: 0.92em; line-height: 1.5; white-space: pre-wrap; }
+  .result .full { font-size: 0.9em; line-height: 1.5; white-space: pre-wrap; display: none; margin-top: 6px; max-height: 420px; overflow: auto; border-top: 1px dashed var(--border); padding-top: 6px; }
+  .result.expanded .full { display: block; }
+  mark { background: var(--hl); color: inherit; padding: 0 1px; }
+  a.openlink { font-size: 0.82em; margin-left: 8px; }
+  #unsupported { display: none; }
+  #progress { display: none; }
+  progress { width: 260px; }
+</style>
+</head>
+<body>
+
+<h1>폴더검색</h1>
+
+<div class="panel" id="setup">
+  <div class="row">
+    <button id="pickBtn">📁 폴더 선택</button>
+    <button id="refreshBtn" class="secondary" disabled>🔄 새로고침</button>
+    <span class="status" id="folderLabel">선택된 폴더 없음</span>
+  </div>
+  <div class="row" id="historyRow"></div>
+  <div class="row">
+    <label class="muted" for="extFilter">대상 확장자(쉼표로 구분, 비우면 전부):</label>
+    <input type="text" id="extFilter" value="txt,md,markdown,html,htm,css,js,json,csv,log,py,php,java,c,cpp,h,xml,yaml,yml,ini,bat,sh,ps1,ts,tsx,jsx,vue,sql,go,rs,cfg,conf">
+  </div>
+  <div class="row">
+    <label class="muted" for="excludeFilter">제외할 폴더 이름(쉼표로 구분):</label>
+    <input type="text" id="excludeFilter" value="System Volume Information,$RECYCLE.BIN,$Recycle.Bin,Config.Msi,node_modules,.git,.svn,.venv,__pycache__">
+  </div>
+  <div class="row" id="progress">
+    <progress id="progressBar" value="0" max="1"></progress>
+    <span class="status" id="progressLabel"></span>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="row">
+    <input type="text" id="query" placeholder="검색어  (예: 회의록 AND (예산 OR 일정) NOT 취소)" disabled>
+    <div class="sortbar">
+      <button id="sortRelevance" class="secondary active">관련도순</button>
+      <button id="sortTime" class="secondary">최신순</button>
+    </div>
+  </div>
+  <div class="muted">공백=AND, OR / AND / NOT(제외) 및 괄호 지원, 큰따옴표로 "정확한 구절" 검색 가능</div>
+  <div class="status" id="resultStatus"></div>
+</div>
+
+<div id="results"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  var pickBtn = document.getElementById('pickBtn');
+  var refreshBtn = document.getElementById('refreshBtn');
+  var folderLabel = document.getElementById('folderLabel');
+  var historyRowEl = document.getElementById('historyRow');
+  var extFilterInput = document.getElementById('extFilter');
+  var excludeFilterInput = document.getElementById('excludeFilter');
+  var progressWrap = document.getElementById('progress');
+  var progressBar = document.getElementById('progressBar');
+  var progressLabel = document.getElementById('progressLabel');
+  var queryInput = document.getElementById('query');
+  var sortRelevanceBtn = document.getElementById('sortRelevance');
+  var sortTimeBtn = document.getElementById('sortTime');
+  var resultStatus = document.getElementById('resultStatus');
+  var resultsEl = document.getElementById('results');
+
+  var currentPath = null;
+  var docs = [];           // { path, fullPath, name, ext, mtime, content, size }
+  var sortMode = 'relevance';
+  var MAX_RESULTS_SHOWN = 200;
+
+  function allowedExts() {
+    var raw = extFilterInput.value.trim();
+    if (!raw) return null; // null = allow everything
+    return raw.split(',').map(function (s) { return s.trim().toLowerCase(); }).filter(Boolean);
+  }
+
+  function excludedFolderNames() {
+    var raw = excludeFilterInput.value.trim();
+    return raw.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+  }
+
+  window.onScanProgress = function (done, total) {
+    progressBar.setAttribute('max', total || 1);
+    progressBar.value = done;
+    progressLabel.textContent = done + ' / ' + total + '개 파일 읽음';
+  };
+
+  async function scan() {
+    if (!currentPath) return;
+    pickBtn.disabled = true;
+    refreshBtn.disabled = true;
+    queryInput.disabled = true;
+    progressWrap.style.display = 'flex';
+    progressLabel.textContent = '파일 목록 확인 중...';
+    progressBar.value = 0;
+
+    try {
+      docs = await pywebview.api.scan_folder(currentPath, allowedExts(), excludedFolderNames());
+    } catch (err) {
+      progressLabel.textContent = '폴더를 읽는 중 오류: ' + err;
+      docs = [];
+    }
+
+    progressWrap.style.display = 'none';
+    pickBtn.disabled = false;
+    refreshBtn.disabled = false;
+    queryInput.disabled = false;
+    resultStatus.textContent = docs.length + '개 파일 인덱싱됨.';
+    runSearch();
+  }
+
+  function applyFolderResult(result) {
+    if (!result) return false;
+    currentPath = result.path;
+    folderLabel.textContent = '폴더: ' + result.name;
+    renderHistoryChips(result.history || []);
+    return true;
+  }
+
+  pickBtn.addEventListener('click', async function () {
+    var result = await pywebview.api.pick_folder();
+    if (applyFolderResult(result)) await scan();
+  });
+
+  refreshBtn.addEventListener('click', function () { scan(); });
+
+  function renderHistoryChips(history) {
+    historyRowEl.innerHTML = '';
+    history.forEach(function (entry) {
+      var chip = document.createElement('span');
+      chip.className = 'chip' + (entry.path === currentPath ? ' active' : '');
+      chip.title = entry.path;
+
+      var label = document.createElement('span');
+      label.textContent = entry.name;
+      chip.appendChild(label);
+
+      var x = document.createElement('span');
+      x.className = 'x';
+      x.textContent = '✕';
+      x.title = '목록에서 제거';
+      x.addEventListener('click', async function (e) {
+        e.stopPropagation();
+        var updated = await pywebview.api.remove_history(entry.path);
+        renderHistoryChips(updated);
+      });
+      chip.appendChild(x);
+
+      chip.addEventListener('click', async function () {
+        var result = await pywebview.api.use_history_entry(entry.path);
+        if (!result) { alert('이 폴더를 더 이상 찾을 수 없습니다 (이동되었거나 삭제된 것 같아요).'); return; }
+        if (applyFolderResult(result)) await scan();
+      });
+      historyRowEl.appendChild(chip);
+    });
+  }
+
+  async function init() {
+    var history = await pywebview.api.get_history();
+    renderHistoryChips(history);
+    if (history.length) {
+      var result = await pywebview.api.use_history_entry(history[0].path);
+      if (applyFolderResult(result)) await scan();
+    }
+  }
+  if (window.pywebview) init();
+  else window.addEventListener('pywebviewready', init);
+
+  // ---- boolean query parser: WORD / "phrase", AND (implicit or explicit), OR, NOT (exclude), parentheses ----
+
+  function tokenize(q) {
+    var tokens = [];
+    var re = /"([^"]*)"|\(|\)|\bAND\b|\bOR\b|\bNOT\b|\S+/g;
+    var m;
+    while ((m = re.exec(q)) !== null) {
+      var t = m[0];
+      if (t === '(' || t === ')') tokens.push({ type: t });
+      else if (t === 'AND' || t === 'OR' || t === 'NOT') tokens.push({ type: t });
+      else if (m[1] !== undefined) tokens.push({ type: 'WORD', value: m[1] });
+      else tokens.push({ type: 'WORD', value: t });
+    }
+    return tokens;
+  }
+
+  function parseQuery(q) {
+    var tokens = tokenize(q);
+    var pos = 0;
+    function peek() { return tokens[pos]; }
+    function next() { return tokens[pos++]; }
+
+    function parseOr() {
+      var node = parseAnd();
+      while (peek() && peek().type === 'OR') {
+        next();
+        node = { op: 'OR', left: node, right: parseAnd() };
+      }
+      return node;
+    }
+    function parseAnd() {
+      var node = parseFactor();
+      while (peek() && (peek().type === 'AND' || peek().type === 'NOT' || peek().type === 'WORD' || peek().type === '(')) {
+        var op = 'AND';
+        if (peek().type === 'AND' || peek().type === 'NOT') { op = next().type; }
+        var right = parseFactor();
+        if (!right) break;
+        node = { op: op, left: node, right: right };
+      }
+      return node;
+    }
+    function parseFactor() {
+      var t = peek();
+      if (!t) return null;
+      if (t.type === '(') {
+        next();
+        var node = parseOr();
+        if (peek() && peek().type === ')') next();
+        return node;
+      }
+      if (t.type === 'WORD') {
+        next();
+        return { op: 'WORD', value: t.value.toLowerCase() };
+      }
+      return null;
+    }
+
+    if (!tokens.length) return null;
+    return parseOr();
+  }
+
+  function evalNode(node, haystack) {
+    if (!node) return true;
+    if (node.op === 'WORD') return haystack.indexOf(node.value) !== -1;
+    if (node.op === 'AND') return evalNode(node.left, haystack) && evalNode(node.right, haystack);
+    if (node.op === 'OR') return evalNode(node.left, haystack) || evalNode(node.right, haystack);
+    if (node.op === 'NOT') return evalNode(node.left, haystack) && !evalNode(node.right, haystack);
+    return true;
+  }
+
+  function collectPositiveWords(node, out) {
+    if (!node) return;
+    if (node.op === 'WORD') { out.push(node.value); return; }
+    if (node.op === 'NOT') { collectPositiveWords(node.left, out); return; } // skip excluded side
+    collectPositiveWords(node.left, out);
+    collectPositiveWords(node.right, out);
+  }
+
+  function countOccurrences(haystack, needle) {
+    if (!needle) return 0;
+    var count = 0, idx = 0;
+    while ((idx = haystack.indexOf(needle, idx)) !== -1) { count++; idx += needle.length; }
+    return count;
+  }
+
+  function score(doc, positiveWords, rawQuery) {
+    var haystack = (doc.name + '\n' + doc.content).toLowerCase();
+    var s = 0;
+    positiveWords.forEach(function (w) { s += countOccurrences(haystack, w); });
+    var lname = doc.name.toLowerCase();
+    var q = rawQuery.trim().toLowerCase();
+    if (q && (lname === q || lname === q + '.' + doc.ext)) s += 1000;
+    else if (q && lname.indexOf(q) !== -1) s += 50;
+    return s;
+  }
+
+  function highlight(text, words) {
+    var out = escapeHtml(text);
+    words.forEach(function (w) {
+      if (!w) return;
+      var re = new RegExp('(' + w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'ig');
+      out = out.replace(re, '<mark>$1</mark>');
+    });
+    return out;
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+
+  function snippetAround(content, words, radius) {
+    if (!content) return '';
+    var lower = content.toLowerCase();
+    var idx = -1;
+    for (var i = 0; i < words.length && idx === -1; i++) {
+      idx = lower.indexOf(words[i]);
+    }
+    if (idx === -1) return content.slice(0, radius * 2);
+    var start = Math.max(0, idx - radius);
+    var end = Math.min(content.length, idx + radius);
+    return (start > 0 ? '…' : '') + content.slice(start, end) + (end < content.length ? '…' : '');
+  }
+
+  function fmtDate(ms) {
+    var d = new Date(ms);
+    function p(n) { return (n < 10 ? '0' : '') + n; }
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  function fmtSize(bytes) {
+    if (bytes < 1024) return bytes + 'B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + 'KB';
+    return (bytes / 1024 / 1024).toFixed(1) + 'MB';
+  }
+
+  function runSearch() {
+    var q = queryInput.value.trim();
+    var node = q ? parseQuery(q) : null;
+    var positiveWords = [];
+    if (node) collectPositiveWords(node, positiveWords);
+
+    var matched = docs.filter(function (doc) {
+      if (!node) return true;
+      var haystack = (doc.name + '\n' + doc.content).toLowerCase();
+      return evalNode(node, haystack);
+    });
+
+    if (sortMode === 'relevance' && q) {
+      matched.forEach(function (d) { d._score = score(d, positiveWords, q); });
+      matched.sort(function (a, b) { return b._score - a._score; });
+    } else {
+      matched.sort(function (a, b) { return b.mtime - a.mtime; });
+    }
+
+    resultStatus.textContent = docs.length + '개 중 ' + matched.length + '개 일치' +
+      (matched.length > MAX_RESULTS_SHOWN ? ' (상위 ' + MAX_RESULTS_SHOWN + '개만 표시)' : '');
+
+    renderResults(matched.slice(0, MAX_RESULTS_SHOWN), positiveWords);
+  }
+
+  function renderResults(list, words) {
+    resultsEl.innerHTML = '';
+    list.forEach(function (doc) {
+      var div = document.createElement('div');
+      div.className = 'result';
+
+      var pathEl = document.createElement('div');
+      pathEl.className = 'path';
+      pathEl.innerHTML = highlight(doc.path, words);
+      pathEl.addEventListener('click', function () {
+        div.classList.toggle('expanded');
+        if (div.classList.contains('expanded') && !fullEl.dataset.filled) {
+          fullEl.innerHTML = highlight(doc.content || '(내용 없음 또는 너무 큰 파일)', words);
+          fullEl.dataset.filled = '1';
+        }
+      });
+      div.appendChild(pathEl);
+
+      var openLink = document.createElement('a');
+      openLink.href = '#';
+      openLink.className = 'openlink';
+      openLink.textContent = '기본 프로그램으로 열기';
+      openLink.addEventListener('click', async function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        var ok = await pywebview.api.open_file(doc.fullPath);
+        if (!ok) alert('열 수 없습니다.');
+      });
+      pathEl.appendChild(openLink);
+
+      var meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.textContent = fmtDate(doc.mtime) + ' · ' + fmtSize(doc.size) + (typeof doc._score === 'number' ? ' · 점수 ' + doc._score : '');
+      div.appendChild(meta);
+
+      var snippet = document.createElement('div');
+      snippet.className = 'snippet';
+      snippet.innerHTML = highlight(snippetAround(doc.content, words, 120), words);
+      div.appendChild(snippet);
+
+      var fullEl = document.createElement('div');
+      fullEl.className = 'full';
+      div.appendChild(fullEl);
+
+      resultsEl.appendChild(div);
+    });
+  }
+
+  var searchTimer = null;
+  queryInput.addEventListener('input', function () {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(runSearch, 150);
+  });
+
+  sortRelevanceBtn.addEventListener('click', function () {
+    sortMode = 'relevance';
+    sortRelevanceBtn.classList.add('active');
+    sortTimeBtn.classList.remove('active');
+    runSearch();
+  });
+  sortTimeBtn.addEventListener('click', function () {
+    sortMode = 'time';
+    sortTimeBtn.classList.add('active');
+    sortRelevanceBtn.classList.remove('active');
+    runSearch();
+  });
+})();
+</script>
+
+</body>
+</html>

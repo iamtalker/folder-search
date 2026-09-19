@@ -1,0 +1,4 @@
+desktop/history.json
+desktop/__pycache__/
+__pycache__/
+*.pyc

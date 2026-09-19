@@ -5,10 +5,16 @@
 
 A single self-contained HTML file that lets you pick a local folder in your browser and full-text search its files — no server, no install. Just download `폴더검색.html` and open it in your browser.
 
+두 가지 버전이 있습니다: **웹 버전**(`폴더검색.html` 하나) / **데스크톱 버전**(`desktop/` 폴더, 파이썬+pywebview).
+
+There are two versions: a **web version** (single file `폴더검색.html`) and a **desktop version** (`desktop/` folder, Python + pywebview).
+
 ## 요구사항 / Requirements
 
-- **Chrome 또는 Edge** (File System Access API를 사용합니다. Firefox/Safari는 아직 미지원)
-- Chrome or Edge (uses the File System Access API; not yet supported in Firefox/Safari)
+- **웹 버전**: Chrome 또는 Edge (File System Access API를 사용합니다. Firefox/Safari는 아직 미지원)
+- **Web version**: Chrome or Edge (uses the File System Access API; not yet supported in Firefox/Safari)
+- **데스크톱 버전**: Python 3 + `pip install -r desktop/requirements.txt` (Windows, WebView2 런타임 필요 — Windows 10/11엔 보통 이미 있음)
+- **Desktop version**: Python 3 + `pip install -r desktop/requirements.txt` (Windows, needs the WebView2 runtime — already present on most Windows 10/11 machines)
 
 ## 기능 / Features
 
@@ -22,10 +28,21 @@ A single self-contained HTML file that lets you pick a local folder in your brow
 
 ## 사용법 / Usage
 
-1. `폴더검색.html`을 다운로드해서 더블클릭으로 엽니다 (Chrome/Edge).
-2. "📁 폴더 선택"을 눌러 검색할 폴더를 고릅니다.
-3. 검색창에 검색어를 입력합니다. 공백은 AND로 동작하고, `OR`/`NOT`과 괄호도 쓸 수 있습니다.
-4. 폴더 내용이 바뀌었다면 "🔄 새로고침"을 눌러 다시 읽습니다.
+**웹 버전**: `폴더검색.html`을 다운로드해서 더블클릭으로 엽니다 (Chrome/Edge).
+**Web version**: download `폴더검색.html` and open it (Chrome/Edge).
+
+**데스크톱 버전**: `desktop/` 폴더를 받아서 `pip install -r requirements.txt` 후 `run.bat` 실행 (또는 `python main.py`).
+**Desktop version**: grab the `desktop/` folder, `pip install -r requirements.txt`, then run `run.bat` (or `python main.py`).
+
+1. "📁 폴더 선택"을 눌러 검색할 폴더를 고릅니다.
+2. 검색창에 검색어를 입력합니다. 공백은 AND로 동작하고, `OR`/`NOT`과 괄호도 쓸 수 있습니다.
+3. 폴더 내용이 바뀌었다면 "🔄 새로고침"을 눌러 다시 읽습니다.
+
+### 웹 버전 vs 데스크톱 버전 / Web vs Desktop
+
+데스크톱 버전은 OS의 파일 선택창을 그대로 쓰기 때문에, 웹 버전에서 브라우저 보안 정책상 막혀있는 "문서/바탕화면/다운로드" 같은 폴더도 제한 없이 고를 수 있습니다.
+
+The desktop version uses the OS's native folder picker, so it doesn't have the browser's restriction that blocks picking well-known folders like Documents/Desktop/Downloads directly.
 
 ## 왜 만들었나 / Why
 
