@@ -210,7 +210,13 @@ def count_occurrences(haystack, needle):
 
 def score_doc(doc, positive_words, raw_query):
     haystack = doc["_haystack"]
-    s = sum(count_occurrences(haystack, w) for w in positive_words)
+    raw = sum(count_occurrences(haystack, w) for w in positive_words)
+    # Density (hits per character), not a raw count - otherwise a long file
+    # that happens to contain a common query word many times (e.g. a huge
+    # tweet archive with hundreds of hits on a word like "why") outscores a
+    # short, precisely on-topic document that only has a couple of hits.
+    # *1000 just keeps the displayed number in a readable range.
+    s = 1000 * raw / max(1, len(haystack))
     lname = doc["name"].lower()
     q = raw_query.strip().lower()
     if q and (lname == q or lname == q + "." + doc["ext"]):

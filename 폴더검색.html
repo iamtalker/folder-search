@@ -748,8 +748,14 @@
   }
 
   function score(doc, positiveWords, rawQuery) {
-    var s = 0;
-    positiveWords.forEach(function (w) { s += countOccurrences(doc._haystack, w); });
+    var raw = 0;
+    positiveWords.forEach(function (w) { raw += countOccurrences(doc._haystack, w); });
+    // Density (hits per character), not a raw count - otherwise a long file
+    // that happens to contain a common query word many times (e.g. a huge
+    // tweet archive with hundreds of hits on a word like "why") outscores a
+    // short, precisely on-topic document that only has a couple of hits.
+    // *1000 just keeps the displayed number in a readable range.
+    var s = 1000 * raw / Math.max(1, doc._haystack.length);
     var lname = doc.name.toLowerCase();
     var q = rawQuery.trim().toLowerCase();
     if (q && (lname === q || lname === q + '.' + doc.ext)) s += 1000;
