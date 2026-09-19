@@ -22,12 +22,14 @@ FROZEN = bool(getattr(sys, "frozen", False))
 
 def resource_path(relative_path):
     """
-    Locate a bundled file (currently just 폴더검색.html) whether running as
-    a plain script or as a PyInstaller --onefile exe. Frozen, PyInstaller
-    unpacks --add-data files into a temp dir at sys._MEIPASS each run;
-    unfrozen, it's just next to this script as before.
+    Locate 폴더검색.html whether running as a plain script or as the packaged
+    exe. Deliberately kept as a plain external file next to the exe rather
+    than embedded inside it (PyInstaller can bundle it in and extract it to
+    a hidden temp folder at each run, but that makes it invisible - the exe
+    and the html file are meant to be two files sitting together, the same
+    as running from source, just without needing Python installed).
     """
-    base = getattr(sys, "_MEIPASS", APP_DIR) if FROZEN else os.path.join(APP_DIR, "..")
+    base = os.path.dirname(sys.executable) if FROZEN else os.path.join(APP_DIR, "..")
     return os.path.join(base, relative_path)
 
 
@@ -541,6 +543,21 @@ def main():
     # shared with the web version - one file works as both, see 폴더검색.html's
     # environment detection (pywebview vs plain browser)
     index_path = resource_path("폴더검색.html")
+    if not os.path.exists(index_path):
+        # Reuse webview itself for this message (proven to work in the
+        # frozen build) rather than a raw ctypes MessageBoxW call, which
+        # turned out not to reliably show up from a --windowed PyInstaller
+        # build.
+        err_html = (
+            "<html><body style='font-family:sans-serif;padding:24px;line-height:1.6'>"
+            "<h2>폴더검색.html 파일을 찾을 수 없습니다</h2>"
+            f"<p>이 exe와 같은 폴더에 <b>폴더검색.html</b>이 있어야 합니다:</p>"
+            f"<p><code>{os.path.dirname(index_path)}</code></p>"
+            "</body></html>"
+        )
+        webview.create_window("폴더검색 - 파일 없음", html=err_html, width=520, height=220)
+        webview.start()
+        return
     window = webview.create_window(
         "폴더검색",
         index_path,

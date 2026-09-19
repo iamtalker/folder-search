@@ -5,16 +5,16 @@
 
 A single self-contained HTML file that lets you pick a local folder in your browser and full-text search its files — no server, no install. Just download `폴더검색.html` and open it in your browser.
 
-세 가지 형태가 있습니다: **웹 버전**(`폴더검색.html` 하나) / **데스크톱 exe**(`FolderSearch.exe` 하나, 파이썬 설치 불필요 — [Releases](../../releases)에서 다운로드) / **데스크톱 파이썬 버전**(`desktop/` 폴더, 직접 실행/개발용).
+세 가지 형태가 있습니다: **웹 버전**(`폴더검색.html` 하나) / **데스크톱 exe**(`FolderSearch.exe` + `폴더검색.html`, 같은 폴더에 두고 실행 — 파이썬 설치 불필요, [Releases](../../releases)에서 다운로드) / **데스크톱 파이썬 버전**(`desktop/` 폴더, 직접 실행/개발용).
 
-There are three forms: a **web version** (single file `폴더검색.html`), a **standalone desktop exe** (`FolderSearch.exe`, no Python install needed — download from [Releases](../../releases)), and the **desktop Python source** (`desktop/` folder, for running from source / development).
+There are three forms: a **web version** (single file `폴더검색.html`), a **standalone desktop exe** (`FolderSearch.exe` + `폴더검색.html`, kept together in the same folder — no Python install needed, download from [Releases](../../releases)), and the **desktop Python source** (`desktop/` folder, for running from source / development).
 
 ## 요구사항 / Requirements
 
 - **웹 버전**: Chrome 또는 Edge (File System Access API를 사용합니다. Firefox/Safari는 아직 미지원)
 - **Web version**: Chrome or Edge (uses the File System Access API; not yet supported in Firefox/Safari)
-- **데스크톱 exe**: Windows + WebView2 런타임(보통 이미 있음). 그 외 아무것도 설치할 필요 없음.
-- **Desktop exe**: Windows + the WebView2 runtime (usually already present). Nothing else to install.
+- **데스크톱 exe**: Windows + WebView2 런타임(보통 이미 있음). 그 외 아무것도 설치할 필요 없음(단, `FolderSearch.exe`와 `폴더검색.html`이 같은 폴더에 있어야 함).
+- **Desktop exe**: Windows + the WebView2 runtime (usually already present). Nothing else to install (but `FolderSearch.exe` and `폴더검색.html` must be in the same folder).
 - **데스크톱 파이썬 버전**: Python 3 + `pip install -r desktop/requirements.txt` (Windows, WebView2 런타임 필요)
 - **Desktop Python version**: Python 3 + `pip install -r desktop/requirements.txt` (Windows, needs the WebView2 runtime)
 
@@ -33,8 +33,8 @@ There are three forms: a **web version** (single file `폴더검색.html`), a **
 **웹 버전**: `폴더검색.html`을 다운로드해서 더블클릭으로 엽니다 (Chrome/Edge).
 **Web version**: download `폴더검색.html` and open it (Chrome/Edge).
 
-**데스크톱 exe**: [Releases](../../releases)에서 `FolderSearch.exe`를 다운로드해서 그냥 실행합니다. 그게 전부입니다.
-**Desktop exe**: download `FolderSearch.exe` from [Releases](../../releases) and just run it. That's it.
+**데스크톱 exe**: [Releases](../../releases)에서 `FolderSearch.exe`와 `폴더검색.html`을 둘 다 다운로드해서 같은 폴더에 넣고 `FolderSearch.exe`를 실행합니다.
+**Desktop exe**: download both `FolderSearch.exe` and `폴더검색.html` from [Releases](../../releases), keep them in the same folder, and run `FolderSearch.exe`.
 
 **데스크톱 파이썬 버전(소스로 실행)**: 저장소 전체(`폴더검색.html` + `desktop/`)를 받아서 `pip install -r desktop/requirements.txt` 후 루트의 `run.bat` 실행 (또는 `python desktop/main.py`).
 **Desktop Python version (run from source)**: grab the whole repo (`폴더검색.html` + `desktop/`), `pip install -r desktop/requirements.txt`, then run `run.bat` at the repo root (or `python desktop/main.py`).
@@ -58,9 +58,9 @@ This tool reads every matching file's content into the browser's memory, so it's
 
 ## exe 빌드 방법 / Building the exe
 
-`desktop/build_exe.bat` 실행 (PyInstaller 사용, `폴더검색.html`을 exe 안에 내장시킴). 결과물은 `desktop/dist/FolderSearch.exe`.
+`desktop/build_exe.bat` 실행 (PyInstaller 사용). 결과물은 `desktop/dist/FolderSearch.exe` + `desktop/dist/폴더검색.html`(같은 폴더에 자동으로 복사됨) — 이 두 파일은 항상 같이 다녀야 합니다.
 
-Run `desktop/build_exe.bat` (uses PyInstaller, embeds `폴더검색.html` inside the exe). Output: `desktop/dist/FolderSearch.exe`.
+Run `desktop/build_exe.bat` (uses PyInstaller). Output: `desktop/dist/FolderSearch.exe` + `desktop/dist/폴더검색.html` (auto-copied alongside it) - these two files must always travel together.
 
 ## 개인정보 / Privacy
 
