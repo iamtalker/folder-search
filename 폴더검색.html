@@ -75,6 +75,7 @@
     <progress id="progressBar" value="0" max="1"></progress>
     <span class="status" id="progressLabel"></span>
   </div>
+  <div class="status" id="indexStatus"></div>
 </div>
 
 <div class="panel">
@@ -108,6 +109,7 @@
   var sortRelevanceBtn = document.getElementById('sortRelevance');
   var sortTimeBtn = document.getElementById('sortTime');
   var resultStatus = document.getElementById('resultStatus');
+  var indexStatus = document.getElementById('indexStatus');
   var resultsEl = document.getElementById('results');
   var unsupportedEl = document.getElementById('unsupported');
   var setupEl = document.getElementById('setup');
@@ -139,15 +141,11 @@
     progressLabel.textContent = done + ' / ' + total + '개 파일 읽음';
   };
 
-  // Set by the desktop backend so the status line can show whether a scan
-  // was actually served from main.py's on-disk cache or read live - added
+  // Set by the desktop backend so indexStatus can show whether a scan was
+  // actually served from main.py's on-disk cache or read live - added
   // because from the progress bar alone (chunked either way) it's hard to
   // tell caching is doing anything without a clock and a label.
   var lastScanSource = null;
-  var lastIndexLabel = ''; // "N개 파일 인덱싱됨 (...)" - shown together with the
-                            // search-match count below, since runSearch() sets
-                            // resultStatus right after scan() does and would
-                            // otherwise immediately overwrite it
   window.onScanSource = function (source, note) {
     lastScanSource = { source: source, note: note || '' };
   };
@@ -455,7 +453,7 @@
       var cached = scanCache.get(currentRef);
       if (!forceRefresh && cached && cached.filterKey === fkey) {
         totalCount = cached.total;
-        lastIndexLabel = totalCount + '개 파일 인덱싱됨 (이 세션 메모리 캐시, 0ms)';
+        indexStatus.textContent = totalCount + '개 파일 인덱싱됨 (이 세션 메모리 캐시, 0ms)';
         await runSearch();
         return;
       }
@@ -492,7 +490,7 @@
     pickBtn.disabled = false;
     refreshBtn.disabled = false;
     queryInput.disabled = false;
-    lastIndexLabel = totalCount + '개 파일 인덱싱됨' + sourceLabel;
+    indexStatus.textContent = totalCount + '개 파일 인덱싱됨' + sourceLabel;
     await runSearch();
   }
 
@@ -724,8 +722,7 @@
     var result = await Backend.runSearch(currentRef, q, sortMode);
     if (mySeq !== searchSeq) return; // a newer search finished first, drop this stale one
 
-    resultStatus.textContent = (lastIndexLabel ? lastIndexLabel + ' · ' : '') +
-      result.total + '개 중 ' + result.matchedTotal + '개 일치' +
+    resultStatus.textContent = result.total + '개 중 ' + result.matchedTotal + '개 일치' +
       (result.matchedTotal > MAX_RESULTS_SHOWN ? ' (상위 ' + MAX_RESULTS_SHOWN + '개만 표시)' : '');
 
     renderResults(result.results);
