@@ -53,7 +53,7 @@
 <h1>폴더검색</h1>
 
 <div id="unsupported" class="panel">
-  이 브라우저는 폴더 선택 기능(File System Access API)을 지원하지 않습니다. Chrome 또는 Edge 최신 버전을 사용해주세요.
+  이 브라우저는 폴더 선택 기능(File System Access API)을 지원하지 않습니다. Chrome 또는 Edge 최신 버전을 사용하시거나, 데스크톱 버전(run.bat)을 사용해주세요.
 </div>
 
 <div class="panel" id="setup">
@@ -95,14 +95,6 @@
 (function () {
   'use strict';
 
-  var unsupportedEl = document.getElementById('unsupported');
-  var setupEl = document.getElementById('setup');
-  if (!window.showDirectoryPicker) {
-    unsupportedEl.style.display = 'block';
-    setupEl.style.display = 'none';
-    return;
-  }
-
   var pickBtn = document.getElementById('pickBtn');
   var refreshBtn = document.getElementById('refreshBtn');
   var folderLabel = document.getElementById('folderLabel');
@@ -117,11 +109,12 @@
   var sortTimeBtn = document.getElementById('sortTime');
   var resultStatus = document.getElementById('resultStatus');
   var resultsEl = document.getElementById('results');
+  var unsupportedEl = document.getElementById('unsupported');
+  var setupEl = document.getElementById('setup');
 
-  var dirHandle = null;
-  var docs = [];           // { path, name, ext, mtime, content, size }
+  var currentRef = null;   // path string (desktop) or FileSystemDirectoryHandle (web)
+  var docs = [];           // { path, name, ext, mtime, content, size, ... }
   var sortMode = 'relevance';
-  var MAX_FILE_BYTES = 3 * 1024 * 1024; // skip content-read for files bigger than this
   var MAX_RESULTS_SHOWN = 200;
 
   function allowedExts() {
@@ -132,8 +125,7 @@
 
   function excludedFolderNames() {
     var raw = excludeFilterInput.value.trim();
-    if (!raw) return new Set();
-    return new Set(raw.split(',').map(function (s) { return s.trim(); }).filter(Boolean));
+    return raw.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
   }
 
   function extOf(name) {
@@ -141,86 +133,250 @@
     return i === -1 ? '' : name.slice(i + 1).toLowerCase();
   }
 
-  async function* walk(handle, prefix, excludeNames) {
-    var it;
-    try {
-      it = handle.entries();
-    } catch (err) {
-      return; // can't even open this directory (permissions) - skip it entirely
+  window.onScanProgress = function (done, total) {
+    progressBar.setAttribute('max', total || 1);
+    progressBar.value = done;
+    progressLabel.textContent = done + ' / ' + total + '개 파일 읽음';
+  };
+
+  // =====================================================================
+  // Backend abstraction: same UI/search logic runs on top of either the
+  // desktop app (pywebview -> Python does real filesystem access, no
+  // Documents/Desktop restriction) or a plain browser (File System Access
+  // API). Only these two objects differ; everything below them is shared.
+  // =====================================================================
+
+  var DesktopBackend = {
+    openLinkLabel: '기본 프로그램으로 열기',
+
+    init: async function () {
+      return { history: await pywebview.api.get_history() };
+    },
+    pickFolder: async function () {
+      return await pywebview.api.pick_folder();
+    },
+    useHistoryEntry: async function (entry) {
+      return await pywebview.api.use_history_entry(entry.path);
+    },
+    removeHistory: async function (entry) {
+      return await pywebview.api.remove_history(entry.path);
+    },
+    isCurrentEntry: function (entry, ref) {
+      return entry.path === ref;
+    },
+    scanFolder: async function (ref, exts, excludeNames) {
+      return await pywebview.api.scan_folder(ref, exts, excludeNames);
+    },
+    openFile: async function (doc) {
+      return await pywebview.api.open_file(doc.fullPath);
     }
-    while (true) {
-      var result;
+  };
+
+  var WebBackend = {
+    openLinkLabel: '새 탭에서 열기',
+    MAX_FILE_BYTES: 3 * 1024 * 1024,
+    MAX_HISTORY: 8,
+    DB_NAME: 'folder-search-db',
+    STORE: 'handles',
+
+    openDB: function () {
+      var self = this;
+      return new Promise(function (resolve, reject) {
+        var req = indexedDB.open(self.DB_NAME, 1);
+        req.onupgradeneeded = function () { req.result.createObjectStore(self.STORE); };
+        req.onsuccess = function () { resolve(req.result); };
+        req.onerror = function () { reject(req.error); };
+      });
+    },
+    idbSet: function (key, value) {
+      var self = this;
+      return this.openDB().then(function (db) {
+        return new Promise(function (resolve, reject) {
+          var tx = db.transaction(self.STORE, 'readwrite');
+          tx.objectStore(self.STORE).put(value, key);
+          tx.oncomplete = resolve;
+          tx.onerror = function () { reject(tx.error); };
+        });
+      });
+    },
+    idbGet: function (key) {
+      var self = this;
+      return this.openDB().then(function (db) {
+        return new Promise(function (resolve, reject) {
+          var tx = db.transaction(self.STORE, 'readonly');
+          var req = tx.objectStore(self.STORE).get(key);
+          req.onsuccess = function () { resolve(req.result); };
+          req.onerror = function () { reject(req.error); };
+        });
+      });
+    },
+    _addToHistory: async function (handle) {
+      var history = (await this.idbGet('folderHistory').catch(function () { return []; })) || [];
+      var filtered = [];
+      for (var i = 0; i < history.length; i++) {
+        var same = false;
+        try { same = await handle.isSameEntry(history[i].handle); } catch (err) {}
+        if (!same) filtered.push(history[i]);
+      }
+      filtered.unshift({ name: handle.name, handle: handle });
+      if (filtered.length > this.MAX_HISTORY) filtered = filtered.slice(0, this.MAX_HISTORY);
+      await this.idbSet('folderHistory', filtered).catch(function () {});
+      return filtered;
+    },
+
+    init: async function () {
+      return { history: (await this.idbGet('folderHistory').catch(function () { return []; })) || [] };
+    },
+    pickFolder: async function () {
+      var handle;
       try {
-        result = await it.next();
+        handle = await window.showDirectoryPicker();
       } catch (err) {
-        return; // hit an unreadable entry - stop this directory, but the
-                 // caller (parent walk) carries on with its remaining siblings
+        return null; // user cancelled
       }
-      if (result.done) return;
-      var name = result.value[0], child = result.value[1];
-      if (excludeNames.has(name)) continue;
-      var path = prefix ? prefix + '/' + name : name;
-      if (child.kind === 'directory') {
-        yield* walk(child, path, excludeNames);
-      } else {
-        yield { name: name, path: path, handle: child };
+      var history = await this._addToHistory(handle);
+      return { path: handle, name: handle.name, history: history };
+    },
+    useHistoryEntry: async function (entry) {
+      var p;
+      try {
+        p = await entry.handle.requestPermission({ mode: 'read' });
+      } catch (err) {
+        return null;
+      }
+      if (p !== 'granted') return null;
+      var history = await this._addToHistory(entry.handle);
+      return { path: entry.handle, name: entry.handle.name, history: history };
+    },
+    removeHistory: async function (entry) {
+      var history = (await this.idbGet('folderHistory').catch(function () { return []; })) || [];
+      var filtered = [];
+      for (var i = 0; i < history.length; i++) {
+        var same = false;
+        try { same = await entry.handle.isSameEntry(history[i].handle); } catch (err) {}
+        if (!same) filtered.push(history[i]);
+      }
+      await this.idbSet('folderHistory', filtered).catch(function () {});
+      return filtered;
+    },
+    isCurrentEntry: function (entry, ref) {
+      return entry.handle === ref;
+    },
+
+    walk: async function* (handle, prefix, excludeSet) {
+      var it;
+      try {
+        it = handle.entries();
+      } catch (err) {
+        return; // can't open this directory (permissions) - skip it entirely
+      }
+      while (true) {
+        var result;
+        try {
+          result = await it.next();
+        } catch (err) {
+          return; // unreadable entry - stop this dir; parent carries on with siblings
+        }
+        if (result.done) return;
+        var name = result.value[0], child = result.value[1];
+        if (excludeSet.has(name)) continue;
+        var path = prefix ? prefix + '/' + name : name;
+        if (child.kind === 'directory') {
+          yield* this.walk(child, path, excludeSet);
+        } else {
+          yield { name: name, path: path, handle: child };
+        }
+      }
+    },
+
+    scanFolder: async function (dirHandle, exts, excludeNames) {
+      var self = this;
+      var excludeSet = new Set(excludeNames || []);
+      var entries = [];
+      try {
+        for await (const e of this.walk(dirHandle, '', excludeSet)) {
+          if (exts && !exts.includes(extOf(e.name))) continue;
+          entries.push(e);
+        }
+      } catch (err) { /* best effort */ }
+
+      var newDocs = [];
+      var total = entries.length;
+      window.onScanProgress(0, total);
+
+      var CHUNK = 40;
+      for (var i = 0; i < entries.length; i += CHUNK) {
+        var chunk = entries.slice(i, i + CHUNK);
+        await Promise.all(chunk.map(async function (e) {
+          try {
+            var file = await e.handle.getFile();
+            var content = '';
+            if (file.size <= self.MAX_FILE_BYTES) {
+              content = await file.text().catch(function () { return ''; });
+            }
+            newDocs.push({
+              path: e.path,
+              name: e.name,
+              ext: extOf(e.name),
+              mtime: file.lastModified,
+              size: file.size,
+              content: content,
+              fileHandle: e.handle
+            });
+          } catch (err) { /* unreadable file, skip */ }
+        }));
+        window.onScanProgress(Math.min(i + CHUNK, total), total);
+        await new Promise(function (r) { setTimeout(r, 0); }); // yield to UI
+      }
+      return newDocs;
+    },
+
+    openFile: async function (doc) {
+      try {
+        var url;
+        if (doc.content) {
+          // use the already-decoded text so the browser doesn't have to guess
+          // the encoding (it often guesses wrong for Korean text otherwise)
+          var blob = new Blob([doc.content], { type: 'text/plain;charset=utf-8' });
+          url = URL.createObjectURL(blob);
+        } else {
+          var file = await doc.fileHandle.getFile();
+          url = URL.createObjectURL(file);
+        }
+        window.open(url, '_blank');
+        return true;
+      } catch (err) {
+        return false;
       }
     }
+  };
+
+  var Backend = null; // set to DesktopBackend or WebBackend once we know the environment
+
+  function applyFolderResult(result) {
+    if (!result) return false;
+    currentRef = result.path;
+    folderLabel.textContent = '폴더: ' + result.name;
+    renderHistoryChips(result.history || []);
+    return true;
   }
 
   async function scan() {
-    if (!dirHandle) return;
+    if (!currentRef) return;
     pickBtn.disabled = true;
     refreshBtn.disabled = true;
     queryInput.disabled = true;
     progressWrap.style.display = 'flex';
     progressLabel.textContent = '파일 목록 확인 중...';
-    progressBar.removeAttribute('value');
-
-    var exts = allowedExts();
-    var excludeNames = excludedFolderNames();
-    var entries = [];
-    try {
-      for await (const e of walk(dirHandle, '', excludeNames)) {
-        if (exts && !exts.includes(extOf(e.name))) continue;
-        entries.push(e);
-      }
-    } catch (err) {
-      progressLabel.textContent = '폴더를 읽는 중 오류: ' + err.message;
-    }
-
-    var newDocs = [];
-    var total = entries.length;
-    progressBar.setAttribute('max', total || 1);
     progressBar.value = 0;
 
-    var CHUNK = 40;
-    for (var i = 0; i < entries.length; i += CHUNK) {
-      var chunk = entries.slice(i, i + CHUNK);
-      await Promise.all(chunk.map(async function (e) {
-        try {
-          var file = await e.handle.getFile();
-          var content = '';
-          if (file.size <= MAX_FILE_BYTES) {
-            content = await file.text().catch(function () { return ''; });
-          }
-          newDocs.push({
-            path: e.path,
-            name: e.name,
-            ext: extOf(e.name),
-            mtime: file.lastModified,
-            size: file.size,
-            content: content,
-            fileHandle: e.handle
-          });
-        } catch (err) { /* unreadable file, skip */ }
-      }));
-      progressBar.value = Math.min(i + CHUNK, total);
-      progressLabel.textContent = progressBar.value + ' / ' + total + '개 파일 읽음';
-      await new Promise(function (r) { setTimeout(r, 0); }); // yield to UI
+    try {
+      docs = await Backend.scanFolder(currentRef, allowedExts(), excludedFolderNames());
+    } catch (err) {
+      progressLabel.textContent = '폴더를 읽는 중 오류: ' + err;
+      docs = [];
     }
 
-    docs = newDocs;
     progressWrap.style.display = 'none';
     pickBtn.disabled = false;
     refreshBtn.disabled = false;
@@ -230,102 +386,18 @@
   }
 
   pickBtn.addEventListener('click', async function () {
-    try {
-      dirHandle = await window.showDirectoryPicker();
-    } catch (err) {
-      return; // user cancelled
-    }
-    folderLabel.textContent = '폴더: ' + dirHandle.name;
-    var updated = await addToHistory(dirHandle);
-    renderHistoryChips(updated);
-    await scan();
+    var result = await Backend.pickFolder();
+    if (applyFolderResult(result)) await scan();
   });
 
   refreshBtn.addEventListener('click', function () { scan(); });
-
-  // ---- remember several recently-used folders across reloads (IndexedDB,
-  // since FileSystemDirectoryHandle objects are structured-cloneable) ----
-
-  var MAX_HISTORY = 8;
-  var DB_NAME = 'folder-search-db', STORE = 'handles';
-  function openDB() {
-    return new Promise(function (resolve, reject) {
-      var req = indexedDB.open(DB_NAME, 1);
-      req.onupgradeneeded = function () { req.result.createObjectStore(STORE); };
-      req.onsuccess = function () { resolve(req.result); };
-      req.onerror = function () { reject(req.error); };
-    });
-  }
-  function idbSet(key, value) {
-    return openDB().then(function (db) {
-      return new Promise(function (resolve, reject) {
-        var tx = db.transaction(STORE, 'readwrite');
-        tx.objectStore(STORE).put(value, key);
-        tx.oncomplete = resolve;
-        tx.onerror = function () { reject(tx.error); };
-      });
-    });
-  }
-  function idbGet(key) {
-    return openDB().then(function (db) {
-      return new Promise(function (resolve, reject) {
-        var tx = db.transaction(STORE, 'readonly');
-        var req = tx.objectStore(STORE).get(key);
-        req.onsuccess = function () { resolve(req.result); };
-        req.onerror = function () { reject(req.error); };
-      });
-    });
-  }
-
-  // Adds/moves `handle` to the front of the remembered-folders list and persists it.
-  async function addToHistory(handle) {
-    var history = (await idbGet('folderHistory').catch(function () { return []; })) || [];
-    var filtered = [];
-    for (var i = 0; i < history.length; i++) {
-      var same = false;
-      try { same = await handle.isSameEntry(history[i].handle); } catch (err) {}
-      if (!same) filtered.push(history[i]);
-    }
-    filtered.unshift({ name: handle.name, handle: handle });
-    if (filtered.length > MAX_HISTORY) filtered = filtered.slice(0, MAX_HISTORY);
-    await idbSet('folderHistory', filtered).catch(function () {});
-    return filtered;
-  }
-
-  async function removeFromHistory(handle) {
-    var history = (await idbGet('folderHistory').catch(function () { return []; })) || [];
-    var filtered = [];
-    for (var i = 0; i < history.length; i++) {
-      var same = false;
-      try { same = await handle.isSameEntry(history[i].handle); } catch (err) {}
-      if (!same) filtered.push(history[i]);
-    }
-    await idbSet('folderHistory', filtered).catch(function () {});
-    return filtered;
-  }
-
-  async function useHistoryEntry(entry) {
-    var p;
-    try {
-      p = await entry.handle.requestPermission({ mode: 'read' });
-    } catch (err) {
-      alert('이 폴더에 더 이상 접근할 수 없습니다 (이동되었거나 삭제된 것 같아요).');
-      return;
-    }
-    if (p !== 'granted') return;
-    dirHandle = entry.handle;
-    folderLabel.textContent = '폴더: ' + dirHandle.name;
-    var updated = await addToHistory(dirHandle);
-    renderHistoryChips(updated);
-    await scan();
-  }
 
   function renderHistoryChips(history) {
     historyRowEl.innerHTML = '';
     history.forEach(function (entry) {
       var chip = document.createElement('span');
-      chip.className = 'chip';
-      chip.title = '클릭: 이 폴더 사용';
+      chip.className = 'chip' + (Backend.isCurrentEntry(entry, currentRef) ? ' active' : '');
+      chip.title = entry.path || entry.name;
 
       var label = document.createElement('span');
       label.textContent = entry.name;
@@ -337,34 +409,61 @@
       x.title = '목록에서 제거';
       x.addEventListener('click', async function (e) {
         e.stopPropagation();
-        var updated = await removeFromHistory(entry.handle);
+        var updated = await Backend.removeHistory(entry);
         renderHistoryChips(updated);
       });
       chip.appendChild(x);
 
-      chip.addEventListener('click', function () { useHistoryEntry(entry); });
+      chip.addEventListener('click', async function () {
+        var result = await Backend.useHistoryEntry(entry);
+        if (!result) { alert('이 폴더를 더 이상 찾을 수 없습니다 (이동되었거나 삭제된 것 같아요).'); return; }
+        if (applyFolderResult(result)) await scan();
+      });
       historyRowEl.appendChild(chip);
     });
   }
 
-  async function tryRestoreHistory() {
-    var history = (await idbGet('folderHistory').catch(function () { return []; })) || [];
+  async function initApp() {
+    var r = await Backend.init();
+    var history = r.history || [];
     renderHistoryChips(history);
-    if (!history.length) return;
-    var top = history[0];
-    var perm;
-    try {
-      perm = await top.handle.queryPermission({ mode: 'read' });
-    } catch (err) {
-      return; // stale handle, e.g. folder moved/deleted
-    }
-    if (perm === 'granted') {
-      dirHandle = top.handle;
-      folderLabel.textContent = '폴더: ' + dirHandle.name;
-      await scan();
+    if (history.length) {
+      var result = await Backend.useHistoryEntry(history[0]);
+      if (applyFolderResult(result)) await scan();
     }
   }
-  tryRestoreHistory();
+
+  function startDesktop() {
+    Backend = DesktopBackend;
+    initApp();
+  }
+  function startWeb() {
+    Backend = WebBackend;
+    if (!window.showDirectoryPicker) {
+      unsupportedEl.style.display = 'block';
+      setupEl.style.display = 'none';
+      return;
+    }
+    initApp();
+  }
+
+  // Detect environment: pywebview injects window.pywebview and fires
+  // 'pywebviewready'; a plain browser will never do either, so a short
+  // timeout safely distinguishes the two without delaying real usage.
+  (function detectEnvironment() {
+    var settled = false;
+    if (window.pywebview) { settled = true; startDesktop(); return; }
+    window.addEventListener('pywebviewready', function () {
+      if (settled) return;
+      settled = true;
+      startDesktop();
+    });
+    setTimeout(function () {
+      if (settled) return;
+      settled = true;
+      startWeb();
+    }, 150);
+  })();
 
   // ---- boolean query parser: WORD / "phrase", AND (implicit or explicit), OR, NOT (exclude), parentheses ----
 
@@ -549,24 +648,12 @@
       var openLink = document.createElement('a');
       openLink.href = '#';
       openLink.className = 'openlink';
-      openLink.textContent = '새 탭에서 열기';
+      openLink.textContent = Backend.openLinkLabel;
       openLink.addEventListener('click', async function (e) {
         e.preventDefault();
         e.stopPropagation();
-        try {
-          var url;
-          if (doc.content) {
-            // use the already UTF-8-decoded text so the browser doesn't have to
-            // guess the encoding (it often guesses wrong for Korean text and
-            // shows mojibake when opening the raw file bytes directly)
-            var blob = new Blob([doc.content], { type: 'text/plain;charset=utf-8' });
-            url = URL.createObjectURL(blob);
-          } else {
-            var file = await doc.fileHandle.getFile();
-            url = URL.createObjectURL(file);
-          }
-          window.open(url, '_blank');
-        } catch (err) { alert('열 수 없습니다: ' + err.message); }
+        var ok = await Backend.openFile(doc);
+        if (!ok) alert('열 수 없습니다.');
       });
       pathEl.appendChild(openLink);
 

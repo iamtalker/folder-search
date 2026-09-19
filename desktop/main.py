@@ -1,5 +1,8 @@
 """
-Folder Search (desktop) - pywebview wrapper around index.html.
+Folder Search (desktop) - pywebview wrapper around ../폴더검색.html, the
+same file the web version uses. The page detects at runtime whether it is
+running inside pywebview or a plain browser and switches its backend
+(DesktopBackend vs WebBackend) accordingly - see 폴더검색.html.
 
 Uses the OS's native folder picker and reads files directly via Python's
 filesystem APIs, so there is no "this folder is blocked" restriction like
@@ -49,7 +52,12 @@ def read_text(path):
 
 class Api:
     def __init__(self):
-        self.window = None
+        # leading underscore matters: pywebview's inject_pywebview() reflects
+        # over every non-underscore attribute of this object via dir() to
+        # build the exposed JS API, and would otherwise recurse into the
+        # live Window's native WebView2/winforms internals and blow the
+        # stack (this is what was causing the slow-close bug).
+        self._window = None
 
     def _add_history(self, path):
         name = os.path.basename(path.rstrip("\\/")) or path
@@ -68,7 +76,7 @@ class Api:
         return history
 
     def pick_folder(self):
-        result = self.window.create_file_dialog(webview.FOLDER_DIALOG)
+        result = self._window.create_file_dialog(webview.FOLDER_DIALOG)
         if not result:
             return None
         path = result[0] if isinstance(result, (list, tuple)) else result
@@ -135,7 +143,7 @@ class Api:
 
             if i % 40 == 0 or i == total - 1:
                 try:
-                    self.window.evaluate_js(f"window.onScanProgress({i + 1}, {total})")
+                    self._window.evaluate_js(f"window.onScanProgress({i + 1}, {total})")
                 except Exception:
                     pass
 
@@ -144,7 +152,9 @@ class Api:
 
 def main():
     api = Api()
-    index_path = os.path.join(APP_DIR, "index.html")
+    # shared with the web version - one file works as both, see 폴더검색.html's
+    # environment detection (pywebview vs plain browser)
+    index_path = os.path.join(APP_DIR, "..", "폴더검색.html")
     window = webview.create_window(
         "폴더검색",
         index_path,
@@ -153,8 +163,12 @@ def main():
         height=780,
         min_size=(700, 480),
     )
-    api.window = window
+    api._window = window
     webview.start()
+    # webview.start() already blocks until the window is closed, so once it
+    # returns there is nothing left to wait for - exit immediately rather
+    # than waiting on any leftover .NET/WebView2 teardown.
+    os._exit(0)
 
 
 if __name__ == "__main__":
