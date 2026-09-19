@@ -436,7 +436,8 @@ class Api:
         self._docs = docs
         self._docs_root = root_path
 
-    def search(self, root_path, query, sort_mode, date_from=None, date_to=None):
+    def search(self, root_path, query, sort_mode, date_from=None, date_to=None,
+               sort_asc=False, page=1, page_size=MAX_RESULTS_SHOWN):
         """
         Runs entirely server-side against self._docs (populated by
         scan_folder) and returns only a small page of results - see
@@ -446,9 +447,14 @@ class Api:
 
         date_from/date_to: optional epoch-ms bounds (inclusive) on a doc's
         mtime, from the page's date-range inputs.
+        sort_asc: reverses the default order (lowest score / oldest first).
+        page/page_size: 1-indexed pagination over the matched set.
         """
         if root_path != self._docs_root:
             return {"total": 0, "matchedTotal": 0, "results": []}
+
+        page_size = max(1, min(int(page_size or MAX_RESULTS_SHOWN), 2000))
+        page = max(1, int(page or 1))
 
         q = (query or "").strip()
         node = parse_query(q) if q else None
@@ -466,13 +472,14 @@ class Api:
         scores = None
         if sort_mode == "relevance" and q:
             scores = {id(d): score_doc(d, positive_words, q) for d in matched}
-            matched.sort(key=lambda d: -scores[id(d)])
+            matched.sort(key=lambda d: scores[id(d)], reverse=not sort_asc)
         else:
-            matched.sort(key=lambda d: -d["mtime"])
+            matched.sort(key=lambda d: d["mtime"], reverse=not sort_asc)
 
         matched_total = len(matched)
+        start = (page - 1) * page_size
         results = []
-        for d in matched[:MAX_RESULTS_SHOWN]:
+        for d in matched[start:start + page_size]:
             results.append({
                 "path": d["path"],
                 "fullPath": d["fullPath"],

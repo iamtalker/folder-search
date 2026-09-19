@@ -20,7 +20,7 @@
   button { background: var(--accent); color: #fff; border: none; border-radius: 5px; padding: 7px 14px; cursor: pointer; font-size: 0.95em; }
   button:disabled { opacity: 0.4; cursor: default; }
   button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
-  input[type=text] { background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 5px; padding: 7px 10px; font-size: 0.95em; }
+  input[type=text], select { background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 5px; padding: 7px 10px; font-size: 0.95em; }
   #query { flex: 1; min-width: 240px; }
   #extFilter { width: 340px; }
   .muted { color: var(--muted); font-size: 0.88em; }
@@ -82,7 +82,7 @@
   <div class="row">
     <input type="text" id="query" placeholder="검색어  (예: 회의록 AND (예산 OR 일정) NOT 취소)" disabled>
     <div class="sortbar">
-      <button id="sortRelevance" class="secondary active">관련도순</button>
+      <button id="sortRelevance" class="secondary active">관련도순 ▼</button>
       <button id="sortTime" class="secondary">최신순</button>
     </div>
   </div>
@@ -94,10 +94,28 @@
     <input type="text" id="dateTo" placeholder="2025.03.03" style="width:110px">
     <button id="dateClearBtn" class="secondary">기간 지우기</button>
   </div>
+  <div class="row">
+    <label class="muted" for="pageSizeSelect">페이지당 표시:</label>
+    <select id="pageSizeSelect">
+      <option value="20">20개</option>
+      <option value="50" selected>50개</option>
+      <option value="100">100개</option>
+      <option value="200">200개</option>
+      <option value="500">500개</option>
+    </select>
+  </div>
   <div class="status" id="resultStatus"></div>
 </div>
 
 <div id="results"></div>
+
+<div class="panel row" id="pagerRow" style="display:none; justify-content:center;">
+  <button id="prevPageBtn" class="secondary">◀ 이전</button>
+  <span class="status" id="pageInfo"></span>
+  <button id="nextPageBtn" class="secondary">다음 ▶</button>
+  <input type="text" id="pageJumpInput" placeholder="페이지 번호" style="width:90px">
+  <button id="pageJumpBtn" class="secondary">이동</button>
+</div>
 
 <script>
 (function () {
@@ -118,16 +136,25 @@
   var dateClearBtn = document.getElementById('dateClearBtn');
   var sortRelevanceBtn = document.getElementById('sortRelevance');
   var sortTimeBtn = document.getElementById('sortTime');
+  var pageSizeSelect = document.getElementById('pageSizeSelect');
   var resultStatus = document.getElementById('resultStatus');
   var indexStatus = document.getElementById('indexStatus');
   var resultsEl = document.getElementById('results');
   var unsupportedEl = document.getElementById('unsupported');
   var setupEl = document.getElementById('setup');
+  var pagerRow = document.getElementById('pagerRow');
+  var pageInfo = document.getElementById('pageInfo');
+  var prevPageBtn = document.getElementById('prevPageBtn');
+  var nextPageBtn = document.getElementById('nextPageBtn');
+  var pageJumpInput = document.getElementById('pageJumpInput');
+  var pageJumpBtn = document.getElementById('pageJumpBtn');
 
   var currentRef = null;   // path string (desktop) or FileSystemDirectoryHandle (web)
   var totalCount = 0;      // how many files the current folder indexed in total
   var sortMode = 'relevance';
-  var MAX_RESULTS_SHOWN = 200;
+  var sortAsc = false;     // clicking an already-active sort button again flips this
+  var currentPage = 1;     // 1-indexed
+  var pageSize = 50;
 
   function allowedExts() {
     var raw = extFilterInput.value.trim();
@@ -198,8 +225,8 @@
       // the measurements behind it.
       return await pywebview.api.scan_folder(ref, exts, excludeNames, !!forceRefresh);
     },
-    runSearch: async function (ref, query, sortMode, dateFrom, dateTo) {
-      return await pywebview.api.search(ref, query, sortMode, dateFrom, dateTo);
+    runSearch: async function (ref, query, sortMode, dateFrom, dateTo, sortAsc, page, pageSize) {
+      return await pywebview.api.search(ref, query, sortMode, dateFrom, dateTo, sortAsc, page, pageSize);
     },
     getFileContent: async function (ref, doc) {
       return await pywebview.api.get_file_content(ref, doc.path);
@@ -375,7 +402,7 @@
     // already lives in this same JS heap), so unlike DesktopBackend it just
     // runs the shared boolean-parser/scorer/snippet functions directly
     // in-process against the full content it already holds.
-    runSearch: async function (ref, query, sortMode, dateFrom, dateTo) {
+    runSearch: async function (ref, query, sortMode, dateFrom, dateTo, sortAsc, page, pageSize) {
       var q = (query || '').trim();
       var node = q ? parseQuery(q) : null;
       var positiveWords = [];
@@ -391,12 +418,13 @@
 
       if (sortMode === 'relevance' && q) {
         matched.forEach(function (d) { d._score = score(d, positiveWords, q); });
-        matched.sort(function (a, b) { return b._score - a._score; });
+        matched.sort(function (a, b) { return sortAsc ? a._score - b._score : b._score - a._score; });
       } else {
-        matched.sort(function (a, b) { return b.mtime - a.mtime; });
+        matched.sort(function (a, b) { return sortAsc ? a.mtime - b.mtime : b.mtime - a.mtime; });
       }
 
-      var results = matched.slice(0, MAX_RESULTS_SHOWN).map(function (doc) {
+      var start = (page - 1) * pageSize;
+      var results = matched.slice(start, start + pageSize).map(function (doc) {
         return {
           path: doc.path, name: doc.name, ext: doc.ext, mtime: doc.mtime, size: doc.size,
           score: typeof doc._score === 'number' ? doc._score : null,
@@ -459,6 +487,7 @@
 
   async function scan(forceRefresh) {
     if (!currentRef) return;
+    currentPage = 1; // a (re)scan means whatever page we were on no longer applies
 
     var fkey = filterKey();
     if (Backend.usesSessionCache) {
@@ -756,13 +785,26 @@
     var q = queryInput.value.trim();
     var range = dateRangeMs();
     var mySeq = ++searchSeq;
-    var result = await Backend.runSearch(currentRef, q, sortMode, range.from, range.to);
+    var result = await Backend.runSearch(currentRef, q, sortMode, range.from, range.to, sortAsc, currentPage, pageSize);
     if (mySeq !== searchSeq) return; // a newer search finished first, drop this stale one
 
-    resultStatus.textContent = result.total + '개 중 ' + result.matchedTotal + '개 일치' +
-      (result.matchedTotal > MAX_RESULTS_SHOWN ? ' (상위 ' + MAX_RESULTS_SHOWN + '개만 표시)' : '');
-
+    resultStatus.textContent = result.total + '개 중 ' + result.matchedTotal + '개 일치';
     renderResults(result.results);
+    renderPager(result.matchedTotal);
+  }
+
+  function renderPager(matchedTotal) {
+    var totalPages = Math.max(1, Math.ceil(matchedTotal / pageSize));
+    if (currentPage > totalPages) currentPage = totalPages; // e.g. filters just shrank the result set
+    pagerRow.style.display = matchedTotal > pageSize ? 'flex' : 'none';
+    pageInfo.textContent = currentPage + ' / ' + totalPages + ' 페이지';
+    prevPageBtn.disabled = currentPage <= 1;
+    nextPageBtn.disabled = currentPage >= totalPages;
+  }
+
+  function goToPage(p) {
+    currentPage = Math.max(1, p | 0); // upper bound gets clamped in renderPager once matchedTotal is known
+    runSearch();
   }
 
   function renderResults(list) {
@@ -820,6 +862,7 @@
   queryInput.addEventListener('input', debouncedSearch);
 
   function debouncedSearch() {
+    currentPage = 1; // a new query/date range invalidates whatever page we were on
     clearTimeout(searchTimer);
     searchTimer = setTimeout(runSearch, 150);
   }
@@ -828,20 +871,47 @@
   dateClearBtn.addEventListener('click', function () {
     dateFromInput.value = '';
     dateToInput.value = '';
+    currentPage = 1;
     runSearch();
   });
 
-  sortRelevanceBtn.addEventListener('click', function () {
-    sortMode = 'relevance';
-    sortRelevanceBtn.classList.add('active');
-    sortTimeBtn.classList.remove('active');
+  // Clicking the already-active sort button again flips ascending/descending
+  // (e.g. 최신순 -> 오래된순) instead of doing nothing; switching to the
+  // other sort mode always starts descending (highest score / newest first).
+  function applySortLabels() {
+    sortRelevanceBtn.textContent = '관련도순' + (sortMode === 'relevance' ? (sortAsc ? ' ▲' : ' ▼') : '');
+    sortTimeBtn.textContent = (sortMode === 'time' && sortAsc ? '오래된순 ▲' : '최신순' + (sortMode === 'time' ? ' ▼' : ''));
+  }
+  function selectSort(mode) {
+    if (sortMode === mode) {
+      sortAsc = !sortAsc;
+    } else {
+      sortMode = mode;
+      sortAsc = false;
+    }
+    sortRelevanceBtn.classList.toggle('active', sortMode === 'relevance');
+    sortTimeBtn.classList.toggle('active', sortMode === 'time');
+    applySortLabels();
+    currentPage = 1;
+    runSearch();
+  }
+  sortRelevanceBtn.addEventListener('click', function () { selectSort('relevance'); });
+  sortTimeBtn.addEventListener('click', function () { selectSort('time'); });
+
+  pageSizeSelect.addEventListener('change', function () {
+    pageSize = parseInt(pageSizeSelect.value, 10) || 50;
+    currentPage = 1;
     runSearch();
   });
-  sortTimeBtn.addEventListener('click', function () {
-    sortMode = 'time';
-    sortTimeBtn.classList.add('active');
-    sortRelevanceBtn.classList.remove('active');
-    runSearch();
+
+  prevPageBtn.addEventListener('click', function () { goToPage(currentPage - 1); });
+  nextPageBtn.addEventListener('click', function () { goToPage(currentPage + 1); });
+  pageJumpBtn.addEventListener('click', function () {
+    var n = parseInt(pageJumpInput.value, 10);
+    if (n) goToPage(n);
+  });
+  pageJumpInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') pageJumpBtn.click();
   });
 })();
 </script>
