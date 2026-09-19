@@ -102,8 +102,15 @@ class Api:
         """
         allowed_exts: list[str] lowercase, no dot, or None/[] for "allow all"
         exclude_names: list[str] of directory names to skip anywhere in the tree
-        Streams progress to the page via window.evaluate_js, then returns the
-        full document list at the end.
+
+        Streams both progress AND the actual document data to the page in
+        small chunks via window.evaluate_js as it goes (window.onScanChunk),
+        instead of building the whole list in memory and marshalling it
+        across the JS bridge in one huge call at the end - for a folder with
+        thousands of files that final one-shot transfer is what caused the
+        visible pause between "done reading" and "search actually works".
+        The return value is just a completion count; the page already has
+        everything it needs by the time this returns.
         """
         exclude_set = set(exclude_names or [])
         ext_set = set(e.lower() for e in allowed_exts) if allowed_exts else None
@@ -123,13 +130,27 @@ class Api:
                 candidates.append((os.path.join(dirpath, fname), fname, ext))
 
         total = len(candidates)
-        docs = []
+        CHUNK = 40
+        chunk = []
+
+        def flush(done):
+            if chunk:
+                try:
+                    self._window.evaluate_js(f"window.onScanChunk({json.dumps(chunk)})")
+                except Exception:
+                    pass
+                chunk.clear()
+            try:
+                self._window.evaluate_js(f"window.onScanProgress({done}, {total})")
+            except Exception:
+                pass
+
         for i, (full_path, fname, ext) in enumerate(candidates):
             try:
                 st = os.stat(full_path)
                 content = read_text(full_path) if st.st_size <= MAX_FILE_BYTES else ""
                 rel_path = os.path.relpath(full_path, root_path).replace("\\", "/")
-                docs.append({
+                chunk.append({
                     "path": rel_path,
                     "fullPath": full_path,
                     "name": fname,
@@ -141,13 +162,10 @@ class Api:
             except OSError:
                 pass
 
-            if i % 40 == 0 or i == total - 1:
-                try:
-                    self._window.evaluate_js(f"window.onScanProgress({i + 1}, {total})")
-                except Exception:
-                    pass
+            if (i + 1) % CHUNK == 0 or i == total - 1:
+                flush(i + 1)
 
-        return docs
+        return total
 
 
 def main():

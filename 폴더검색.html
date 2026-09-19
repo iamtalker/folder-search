@@ -165,7 +165,17 @@
       return entry.path === ref;
     },
     scanFolder: async function (ref, exts, excludeNames) {
-      return await pywebview.api.scan_folder(ref, exts, excludeNames);
+      // main.py streams results in small chunks via window.onScanChunk as it
+      // reads (instead of marshalling one huge list across the JS bridge at
+      // the very end), so the page can start showing results the moment
+      // scanning finishes instead of pausing afterward to receive it all.
+      var collected = [];
+      window.onScanChunk = function (chunk) {
+        for (var i = 0; i < chunk.length; i++) collected.push(chunk[i]);
+      };
+      await pywebview.api.scan_folder(ref, exts, excludeNames);
+      window.onScanChunk = function () {};
+      return collected;
     },
     openFile: async function (doc) {
       return await pywebview.api.open_file(doc.fullPath);
