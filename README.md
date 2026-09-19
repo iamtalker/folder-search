@@ -31,8 +31,8 @@ There are two versions: a **web version** (single file `폴더검색.html`) and 
 **웹 버전**: `폴더검색.html`을 다운로드해서 더블클릭으로 엽니다 (Chrome/Edge).
 **Web version**: download `폴더검색.html` and open it (Chrome/Edge).
 
-**데스크톱 버전**: `desktop/` 폴더를 받아서 `pip install -r requirements.txt` 후 `run.bat` 실행 (또는 `python main.py`).
-**Desktop version**: grab the `desktop/` folder, `pip install -r requirements.txt`, then run `run.bat` (or `python main.py`).
+**데스크톱 버전**: 저장소 전체(`폴더검색.html` + `desktop/`)를 받아서 `pip install -r desktop/requirements.txt` 후 루트의 `run.bat` 실행 (또는 `python desktop/main.py`).
+**Desktop version**: grab the whole repo (`폴더검색.html` + `desktop/`), `pip install -r desktop/requirements.txt`, then run `run.bat` at the repo root (or `python desktop/main.py`).
 
 1. "📁 폴더 선택"을 눌러 검색할 폴더를 고릅니다.
 2. 검색창에 검색어를 입력합니다. 공백은 AND로 동작하고, `OR`/`NOT`과 괄호도 쓸 수 있습니다.
