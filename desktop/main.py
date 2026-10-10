@@ -74,7 +74,12 @@ MAX_RESULTS_SHOWN = 200
 # snippet, not full content) ever cross that bridge.
 # =============================================================================
 
-_TOKEN_RE = re.compile(r'"([^"]*)"|\(|\)|\bAND\b|\bOR\b|\bNOT\b|\S+')
+# & | ! are symbol aliases for AND / OR / NOT (a doubled && or || counts once).
+# & and | split words wherever they appear outside quotes; ! is only an
+# operator at the start of a word (the word alternative is greedy, so the
+# regex can only be positioned on a '!' there), which keeps "wow!" a literal
+# word. Quote the term to search for the symbols themselves.
+_TOKEN_RE = re.compile(r'"([^"]*)"|\(|\)|&+|\|+|!+|\bAND\b|\bOR\b|\bNOT\b|[^\s&|]+')
 
 
 def tokenize_query(q):
@@ -97,8 +102,12 @@ def tokenize_query(q):
         elif t == ")":
             tokens.append({"type": ")"})
             depth = max(0, depth - 1)
-        elif t in ("AND", "OR", "NOT"):
-            tokens.append({"type": t})
+        elif t == "AND" or t[0] == "&":
+            tokens.append({"type": "AND"})
+        elif t == "OR" or t[0] == "|":
+            tokens.append({"type": "OR"})
+        elif t == "NOT" or t[0] == "!":
+            tokens.append({"type": "NOT"})
         elif m.group(1) is not None:
             tokens.append({"type": "WORD", "value": m.group(1)})
         else:
@@ -142,6 +151,9 @@ def parse_query(q):
         while peek() and peek()["type"] in ("AND", "NOT", "WORD", "("):
             op = "AND"
             if peek()["type"] in ("AND", "NOT"):
+                op = nxt()["type"]
+            # "a AND NOT b" / "a & !b": the NOT is the real operator
+            if op == "AND" and peek() and peek()["type"] == "NOT":
                 op = nxt()["type"]
             right = parse_factor()
             if right is None:
