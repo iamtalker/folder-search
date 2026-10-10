@@ -7,7 +7,7 @@
 
 ## 요구사항
 
-- **웹 버전**: Chrome 또는 Edge (File System Access API를 사용합니다. Firefox/Safari는 아직 미지원)
+- **웹 버전**: Chrome 또는 Edge (File System Access API를 사용합니다. Firefox/Safari는 아직 미지원. Brave는 `brave://flags/#file-system-access-api`를 Enabled로 바꾸고 재시작하면 됨)
 - **데스크톱 exe**: Windows + WebView2 런타임(보통 이미 있음). 그 외 아무것도 설치할 필요 없음(단, `FolderSearch.exe`와 `폴더검색.html`이 같은 폴더에 있어야 함).
 - **데스크톱 파이썬 버전**: Python 3 + `pip install -r desktop/requirements.txt` (Windows, WebView2 런타임 필요)
 

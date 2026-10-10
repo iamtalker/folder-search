@@ -55,7 +55,12 @@
 <h1>폴더검색</h1>
 
 <div id="unsupported" class="panel">
-  이 브라우저는 폴더 선택 기능(File System Access API)을 지원하지 않습니다. Chrome 또는 Edge 최신 버전을 사용하시거나, 데스크톱 버전(run.bat)을 사용해주세요.
+  이 브라우저에서는 폴더 선택 기능(File System Access API)이 꺼져 있거나 지원되지 않습니다.
+  <ul style="margin:8px 0 0; padding-left:20px;">
+    <li><b>Brave</b>: 주소창에 <code>brave://flags/#file-system-access-api</code> 입력 → <b>Enabled</b>로 변경 → Relaunch(재시작)</li>
+    <li><b>Firefox / Safari</b>: 지원하지 않습니다. Chrome 또는 Edge로 열어주세요.</li>
+    <li>브라우저와 상관없이 쓰려면 데스크톱 버전(<code>FolderSearch.exe</code> 또는 <code>run.bat</code>)을 사용하세요.</li>
+  </ul>
 </div>
 
 <div class="panel" id="setup">
